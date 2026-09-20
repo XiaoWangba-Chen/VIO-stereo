@@ -1,0 +1,13 @@
+FROM vins-mono:noetic-core
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ros-noetic-rviz \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY data_generator /root/catkin_ws/src/VINS-Mono/data_generator
+
+RUN source /opt/ros/noetic/setup.bash && \
+    source /root/catkin_ws/devel/setup.bash && \
+    catkin build data_generator --no-status --summarize -j2 -p2
+
+CMD ["bash"]

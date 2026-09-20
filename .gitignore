@@ -9,3 +9,13 @@ A3_rs.launch
 test/
 test.launch
 .vscode/
+
+# Locally recorded sensor data and generated mapping outputs
+/datasets/
+/outputs/
+*.bag
+*.db3
+
+# Python cache files
+__pycache__/
+*.py[cod]

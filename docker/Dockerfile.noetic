@@ -1,0 +1,34 @@
+FROM ros:noetic-perception
+
+SHELL ["/bin/bash", "-c"]
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3-catkin-tools \
+    libatlas-base-dev \
+    libboost-filesystem-dev \
+    libboost-program-options-dev \
+    libboost-system-dev \
+    libceres-dev \
+    libeigen3-dev \
+    ros-noetic-cv-bridge \
+    ros-noetic-image-transport \
+    ros-noetic-message-filters \
+    ros-noetic-tf \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /root/catkin_ws
+COPY . /root/catkin_ws/src/VINS-Mono
+
+RUN source /opt/ros/noetic/setup.bash && \
+    catkin config \
+      --extend /opt/ros/noetic \
+      --cmake-args -DCMAKE_BUILD_TYPE=Release && \
+    catkin build \
+      camera_model feature_tracker vins_estimator pose_graph \
+      --no-status --summarize -j2 -p2
+
+RUN echo 'source /root/catkin_ws/devel/setup.bash' >> /root/.bashrc
+
+CMD ["bash"]
