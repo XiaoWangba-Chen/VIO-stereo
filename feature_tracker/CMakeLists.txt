@@ -19,6 +19,7 @@ catkin_package()
 
 include_directories(
     ${catkin_INCLUDE_DIRS}
+    ${PROJECT_SOURCE_DIR}/src
     )
 
 set(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
@@ -28,10 +29,20 @@ include_directories(
   ${EIGEN3_INCLUDE_DIR}
 )
 
+add_library(stereo_matcher src/stereo_matcher.cpp)
+target_link_libraries(stereo_matcher ${catkin_LIBRARIES} ${OpenCV_LIBS})
+
 add_executable(feature_tracker
     src/feature_tracker_node.cpp
     src/parameters.cpp
     src/feature_tracker.cpp
     )
 
-target_link_libraries(feature_tracker ${catkin_LIBRARIES} ${OpenCV_LIBS})
+target_link_libraries(feature_tracker stereo_matcher ${catkin_LIBRARIES} ${OpenCV_LIBS})
+
+if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(stereo_matcher_test tests/stereo_matcher_test.cpp)
+  if(TARGET stereo_matcher_test)
+    target_link_libraries(stereo_matcher_test stereo_matcher ${catkin_LIBRARIES} ${OpenCV_LIBS})
+  endif()
+endif()

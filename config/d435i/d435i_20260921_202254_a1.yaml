@@ -68,3 +68,4 @@ visualize_camera_size: 0.4
 stereo_use_depth_init: 0
 stereo_use_metric_init: 0
 stereo_use_right_factors: 0
+stereo_track: 0

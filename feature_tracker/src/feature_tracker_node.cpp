@@ -9,8 +9,14 @@
 #include <cstdio>
 #include <cstdint>
 #include <deque>
+#include <condition_variable>
+#include <limits>
+#include <memory>
+#include <mutex>
+#include <thread>
 
 #include "feature_tracker.h"
+#include "stereo_matcher.h"
 
 #define SHOW_UNDISTORTION 0
 
@@ -39,7 +45,7 @@ ros::Time last_right_received;
 bool image_dimensions_checked = false;
 }
 
-ros::Publisher pub_img, pub_match;
+ros::Publisher pub_img, pub_match, pub_stereo_feature;
 ros::Publisher pub_restart;
 
 FeatureTracker trackerData[MAX_NUM_OF_CAM];
@@ -48,6 +54,29 @@ int pub_count = 1;
 bool first_image_flag = true;
 double last_image_time = 0;
 bool init_pub = false;
+std::unique_ptr<StereoMatcher> stereo_matcher;
+
+namespace
+{
+struct StereoMatchJob
+{
+    bool reset = false;
+    cv::Mat left_image;
+    cv::Mat right_image;
+    std::vector<cv::Point2f> left_pixels;
+    std::vector<cv::Point2f> left_normalized;
+    std::vector<int> feature_ids;
+    std_msgs::Header header;
+};
+
+std::deque<StereoMatchJob> stereo_job_queue;
+std::mutex stereo_job_mutex;
+std::condition_variable stereo_job_condition;
+std::thread stereo_worker;
+bool stereo_worker_stopping = false;
+std::size_t stereo_job_max_depth = 0;
+uint64_t stereo_jobs_processed = 0;
+}
 
 namespace
 {
@@ -68,6 +97,27 @@ void printSyncStats()
              sync_stats.max_queue_depth);
 }
 
+void printStereoStats()
+{
+    if (!stereo_matcher)
+        return;
+    const StereoMatchStats &stats = stereo_matcher->stats();
+    const uint64_t accepted = stats.outcomes[STEREO_ACCEPTED];
+    const double match_rate = stats.candidates == 0 ? 0.0 :
+        100.0 * static_cast<double>(accepted) / static_cast<double>(stats.candidates);
+    ROS_INFO("stereo match: frames=%llu candidates=%llu accepted=%llu rate=%.2f%% "
+             "flow=%llu border=%llu fb=%llu epipolar=%llu disparity=%llu depth=%llu",
+             static_cast<unsigned long long>(stats.frames),
+             static_cast<unsigned long long>(stats.candidates),
+             static_cast<unsigned long long>(accepted), match_rate,
+             static_cast<unsigned long long>(stats.outcomes[STEREO_REJECT_FLOW]),
+             static_cast<unsigned long long>(stats.outcomes[STEREO_REJECT_BORDER]),
+             static_cast<unsigned long long>(stats.outcomes[STEREO_REJECT_FB]),
+             static_cast<unsigned long long>(stats.outcomes[STEREO_REJECT_EPIPOLAR]),
+             static_cast<unsigned long long>(stats.outcomes[STEREO_REJECT_DISPARITY]),
+             static_cast<unsigned long long>(stats.outcomes[STEREO_REJECT_DEPTH_RANGE]));
+}
+
 void publishRestart()
 {
     std_msgs::Bool restart_flag;
@@ -86,7 +136,104 @@ void resetTrackerForDiscontinuity()
     init_pub = false;
     trackerData[0] = FeatureTracker();
     trackerData[0].readIntrinsicParameter(CAM_NAMES[0]);
+    if (stereo_matcher)
+    {
+        StereoMatchJob job;
+        job.reset = true;
+        std::lock_guard<std::mutex> lock(stereo_job_mutex);
+        stereo_job_queue.push_back(job);
+        stereo_job_condition.notify_one();
+    }
     publishRestart();
+}
+
+sensor_msgs::PointCloudPtr makeStereoDiagnosticMessage(
+    const std_msgs::Header &header, const std::vector<StereoMatch> &matches)
+{
+    sensor_msgs::PointCloudPtr message(new sensor_msgs::PointCloud);
+    message->header = header;
+
+    const char *channel_names[] = {
+        "feature_id", "left_u", "left_v", "right_x", "right_y",
+        "right_u", "right_v", "right_velocity_x", "right_velocity_y",
+        "stereo_depth", "fb_error", "epipolar_error", "reject_code"};
+    message->channels.resize(sizeof(channel_names) / sizeof(channel_names[0]));
+    for (std::size_t channel = 0; channel < message->channels.size(); ++channel)
+    {
+        message->channels[channel].name = channel_names[channel];
+        message->channels[channel].values.reserve(matches.size());
+    }
+    message->points.reserve(matches.size());
+
+    for (const StereoMatch &match : matches)
+    {
+        geometry_msgs::Point32 point;
+        point.x = match.left_normalized.x;
+        point.y = match.left_normalized.y;
+        point.z = 1.0f;
+        message->points.push_back(point);
+
+        message->channels[0].values.push_back(static_cast<float>(match.feature_id));
+        message->channels[1].values.push_back(match.left_pixel.x);
+        message->channels[2].values.push_back(match.left_pixel.y);
+        message->channels[3].values.push_back(match.right_normalized.x);
+        message->channels[4].values.push_back(match.right_normalized.y);
+        message->channels[5].values.push_back(match.right_pixel.x);
+        message->channels[6].values.push_back(match.right_pixel.y);
+        message->channels[7].values.push_back(match.right_velocity.x);
+        message->channels[8].values.push_back(match.right_velocity.y);
+        message->channels[9].values.push_back(match.depth);
+        message->channels[10].values.push_back(match.fb_error);
+        message->channels[11].values.push_back(match.epipolar_error);
+        message->channels[12].values.push_back(static_cast<float>(match.reject_code));
+    }
+    return message;
+}
+
+void stereoWorkerLoop()
+{
+    for (;;)
+    {
+        StereoMatchJob job;
+        {
+            std::unique_lock<std::mutex> lock(stereo_job_mutex);
+            stereo_job_condition.wait(lock, [] {
+                return stereo_worker_stopping || !stereo_job_queue.empty();
+            });
+            if (stereo_job_queue.empty() && stereo_worker_stopping)
+                break;
+            job = std::move(stereo_job_queue.front());
+            stereo_job_queue.pop_front();
+        }
+        if (job.reset)
+        {
+            stereo_matcher->reset();
+            continue;
+        }
+        TicToc timer;
+        const std::vector<StereoMatch> matches = stereo_matcher->match(
+            job.left_image, job.right_image, job.left_pixels, job.left_normalized,
+            job.feature_ids, job.header.stamp.toSec());
+        pub_stereo_feature.publish(makeStereoDiagnosticMessage(job.header, matches));
+        stereo_jobs_processed++;
+        ROS_INFO("stereo matcher processing costs: %f", timer.toc());
+        if (stereo_jobs_processed % 300 == 0)
+            printStereoStats();
+    }
+}
+
+void stopStereoWorker()
+{
+    if (!stereo_worker.joinable())
+        return;
+    {
+        std::lock_guard<std::mutex> lock(stereo_job_mutex);
+        stereo_worker_stopping = true;
+    }
+    stereo_job_condition.notify_one();
+    stereo_worker.join();
+    ROS_INFO("stereo worker: processed=%llu max_queue=%zu pending=0",
+             static_cast<unsigned long long>(stereo_jobs_processed), stereo_job_max_depth);
 }
 
 cv_bridge::CvImageConstPtr toMono8(const sensor_msgs::ImageConstPtr &img_msg)
@@ -238,6 +385,23 @@ void processImage(const sensor_msgs::ImageConstPtr &img_msg,
             pub_match.publish(color->toImageMsg());
         }
     }
+
+    if (STEREO_TRACK && right_ptr && stereo_matcher)
+    {
+        StereoMatchJob job;
+        job.left_image = trackerData[0].cur_img.clone();
+        job.right_image = right_ptr->image.clone();
+        job.left_pixels = trackerData[0].cur_pts;
+        job.left_normalized = trackerData[0].cur_un_pts;
+        job.feature_ids = trackerData[0].ids;
+        job.header = img_msg->header;
+        {
+            std::lock_guard<std::mutex> lock(stereo_job_mutex);
+            stereo_job_queue.push_back(std::move(job));
+            stereo_job_max_depth = std::max(stereo_job_max_depth, stereo_job_queue.size());
+        }
+        stereo_job_condition.notify_one();
+    }
     ROS_INFO("whole feature tracker processing costs: %f", t_r.toc());
 }
 
@@ -281,7 +445,9 @@ void drainStereoQueues()
             sync_stats.paired++;
             processImage(left, right);
             if (sync_stats.paired % 300 == 0)
+            {
                 printSyncStats();
+            }
         }
         else if (left_stamp < right_stamp)
         {
@@ -353,6 +519,18 @@ int main(int argc, char **argv)
     for (int i = 0; i < NUM_OF_CAM; i++)
         trackerData[i].readIntrinsicParameter(CAM_NAMES[i]);
 
+    if (STEREO_TRACK)
+    {
+        StereoMatcherOptions options;
+        options.baseline_x = STEREO_BASELINE_X;
+        options.fb_threshold = STEREO_FB_THRESHOLD;
+        options.epipolar_threshold = STEREO_EPIPOLAR_THRESHOLD;
+        options.min_depth = STEREO_MIN_DEPTH;
+        options.max_depth = STEREO_MAX_DEPTH;
+        options.equalize = EQUALIZE != 0;
+        stereo_matcher.reset(new StereoMatcher(trackerData[1].m_camera, options));
+    }
+
     if (FISHEYE)
     {
         trackerData[0].fisheye_mask = cv::imread(FISHEYE_MASK, 0);
@@ -365,7 +543,10 @@ int main(int argc, char **argv)
 
     pub_img = node.advertise<sensor_msgs::PointCloud>("feature", 1000);
     pub_match = node.advertise<sensor_msgs::Image>("feature_img", 1000);
+    pub_stereo_feature = node.advertise<sensor_msgs::PointCloud>("stereo_feature", 1000);
     pub_restart = node.advertise<std_msgs::Bool>("restart", 1000);
+    if (STEREO_TRACK)
+        stereo_worker = std::thread(stereoWorkerLoop);
 
     ros::Subscriber mono_subscriber;
     ros::Subscriber left_subscriber;
@@ -383,11 +564,13 @@ int main(int argc, char **argv)
     }
 
     ros::spin();
+    stopStereoWorker();
     sync_stats.left_unpaired += left_image_buf.size();
     sync_stats.right_unpaired += right_image_buf.size();
     left_image_buf.clear();
     right_image_buf.clear();
     printSyncStats();
+    printStereoStats();
     if (NUM_OF_CAM == 2)
     {
         std::fprintf(stdout,

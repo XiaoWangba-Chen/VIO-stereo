@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <eigen3/Eigen/Dense>
+#include <opencv2/core/eigen.hpp>
 #include <stdexcept>
 
 std::string IMAGE_TOPIC;
@@ -16,6 +18,11 @@ int FREQ;
 double F_THRESHOLD;
 int SHOW_TRACK;
 int STEREO_TRACK;
+double STEREO_BASELINE_X = 0.0;
+double STEREO_FB_THRESHOLD = 0.5;
+double STEREO_EPIPOLAR_THRESHOLD = 1.0;
+double STEREO_MIN_DEPTH = 0.2;
+double STEREO_MAX_DEPTH = 15.0;
 int EQUALIZE;
 int ROW;
 int COL;
@@ -59,6 +66,12 @@ int readOptionalInt(const cv::FileStorage &settings, const std::string &name, in
 {
     const cv::FileNode node = settings[name];
     return node.empty() ? default_value : static_cast<int>(node);
+}
+
+double readOptionalDouble(const cv::FileStorage &settings, const std::string &name, double default_value)
+{
+    const cv::FileNode node = settings[name];
+    return node.empty() ? default_value : static_cast<double>(node);
 }
 
 std::string readRequiredString(const cv::FileStorage &settings, const std::string &name)
@@ -123,6 +136,49 @@ void validateStereoIntrinsics(const std::string &cam0_path, const std::string &c
     ROS_INFO("validated stereo intrinsics: %dx%d, fx=(%.9f, %.9f), fy=(%.9f, %.9f), cy=(%.9f, %.9f)",
              cam0.width, cam0.height, cam0.fx, cam1.fx, cam0.fy, cam1.fy, cam0.cy, cam1.cy);
 }
+
+double readAndValidateStereoBaseline(const cv::FileStorage &settings)
+{
+    Eigen::Matrix3d rotations[2];
+    Eigen::Vector3d translations[2];
+    for (int camera_id = 0; camera_id < 2; ++camera_id)
+    {
+        const std::string suffix = camera_id == 0 ? "" : "1";
+        const std::string rotation_name = "extrinsicRotation" + suffix;
+        const std::string translation_name = "extrinsicTranslation" + suffix;
+        if (settings[rotation_name].empty() || settings[translation_name].empty())
+            throw std::runtime_error("missing stereo extrinsic: " + rotation_name + " or " + translation_name);
+
+        cv::Mat cv_rotation;
+        cv::Mat cv_translation;
+        settings[rotation_name] >> cv_rotation;
+        settings[translation_name] >> cv_translation;
+        if (cv_rotation.rows != 3 || cv_rotation.cols != 3 ||
+            cv_translation.rows != 3 || cv_translation.cols != 1)
+            throw std::runtime_error("invalid stereo extrinsic dimensions");
+        cv::cv2eigen(cv_rotation, rotations[camera_id]);
+        cv::cv2eigen(cv_translation, translations[camera_id]);
+        rotations[camera_id] = Eigen::Quaterniond(rotations[camera_id]).normalized().toRotationMatrix();
+    }
+
+    const Eigen::Matrix3d relative_rotation = rotations[1].transpose() * rotations[0];
+    const double cosine = std::max(-1.0, std::min(1.0, (relative_rotation.trace() - 1.0) / 2.0));
+    const double angle_degrees = std::acos(cosine) * 180.0 / 3.14159265358979323846;
+    const Eigen::Vector3d baseline_cam0 = rotations[0].transpose() * (translations[1] - translations[0]);
+    const double baseline = baseline_cam0.norm();
+    if (angle_degrees > 1.0)
+        throw std::runtime_error("stereo relative rotation exceeds 1 degree");
+    if (baseline <= 0.01)
+        throw std::runtime_error("stereo baseline must be greater than 1 cm");
+    if (baseline_cam0.x() <= 0.0)
+        throw std::runtime_error("stereo baseline x component must be positive");
+    if (baseline_cam0.tail<2>().norm() > baseline * 0.05)
+        throw std::runtime_error("stereo baseline y/z component exceeds 5 percent");
+
+    ROS_INFO("stereo matcher baseline x=%.9f m, rotation=%.6f deg",
+             baseline_cam0.x(), angle_degrees);
+    return baseline_cam0.x();
+}
 }
 
 void readParameters(ros::NodeHandle &n)
@@ -161,6 +217,18 @@ void readParameters(ros::NodeHandle &n)
     STEREO_USE_DEPTH_INIT = readOptionalInt(fsSettings, "stereo_use_depth_init", 0);
     STEREO_USE_METRIC_INIT = readOptionalInt(fsSettings, "stereo_use_metric_init", 0);
     STEREO_USE_RIGHT_FACTORS = readOptionalInt(fsSettings, "stereo_use_right_factors", 0);
+    STEREO_TRACK = readOptionalInt(fsSettings, "stereo_track", 0);
+    STEREO_FB_THRESHOLD = readOptionalDouble(fsSettings, "stereo_fb_threshold", 0.5);
+    STEREO_EPIPOLAR_THRESHOLD = readOptionalDouble(fsSettings, "stereo_epipolar_threshold", 1.0);
+    STEREO_MIN_DEPTH = readOptionalDouble(fsSettings, "stereo_min_depth", 0.2);
+    STEREO_MAX_DEPTH = readOptionalDouble(fsSettings, "stereo_max_depth", 15.0);
+    if (STEREO_TRACK != 0 && STEREO_TRACK != 1)
+        throw std::runtime_error("stereo_track must be 0 or 1");
+    if (STEREO_FB_THRESHOLD <= 0.0 || STEREO_EPIPOLAR_THRESHOLD <= 0.0 ||
+        STEREO_MIN_DEPTH <= 0.0 || STEREO_MAX_DEPTH <= STEREO_MIN_DEPTH)
+        throw std::runtime_error("invalid stereo matching thresholds or depth range");
+    if (STEREO_TRACK && NUM_OF_CAM != 2)
+        throw std::runtime_error("stereo_track=1 requires num_of_cam=2");
 
     if (NUM_OF_CAM == 2)
     {
@@ -170,10 +238,11 @@ void readParameters(ros::NodeHandle &n)
         if (STEREO_USE_DEPTH_INIT || STEREO_USE_METRIC_INIT || STEREO_USE_RIGHT_FACTORS)
             throw std::runtime_error("stereo estimation switches are not implemented in phase 1 and must be 0");
         validateStereoIntrinsics(CAM_NAMES[0], CAM_NAMES[1]);
+        if (STEREO_TRACK)
+            STEREO_BASELINE_X = readAndValidateStereoBaseline(fsSettings);
     }
 
     WINDOW_SIZE = 20;
-    STEREO_TRACK = false;
     FOCAL_LENGTH = 460;
     PUB_THIS_FRAME = false;
 
