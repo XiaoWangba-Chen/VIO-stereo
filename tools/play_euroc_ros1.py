@@ -7,7 +7,9 @@ import time
 from pathlib import Path
 
 import cv2
+import numpy as np
 import rospy
+import yaml
 from cv_bridge import CvBridge
 from sensor_msgs.msg import Image, Imu
 
@@ -82,16 +84,51 @@ def ensure_strictly_increasing(rows, stream_name):
             raise SystemExit(f"{stream_name} 时间戳不是严格递增: {previous[0]} -> {current[0]}")
 
 
+def euroc_rectification_maps(root):
+    sensors = []
+    for camera in ("cam0", "cam1"):
+        with (root / "mav0" / camera / "sensor.yaml").open() as stream:
+            sensors.append(yaml.safe_load(stream))
+
+    transforms = [np.asarray(sensor["T_BS"]["data"], dtype=np.float64).reshape(4, 4)
+                  for sensor in sensors]
+    intrinsics = []
+    distortions = []
+    for sensor in sensors:
+        fx, fy, cx, cy = sensor["intrinsics"]
+        intrinsics.append(np.asarray([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]]))
+        distortions.append(np.asarray(sensor["distortion_coefficients"], dtype=np.float64))
+
+    rotation_01 = transforms[1][:3, :3].T @ transforms[0][:3, :3]
+    translation_01 = transforms[1][:3, :3].T @ (transforms[0][:3, 3] - transforms[1][:3, 3])
+    size = tuple(int(value) for value in sensors[0]["resolution"])
+    rect0, rect1, proj0, proj1, _, _, _ = cv2.stereoRectify(
+        intrinsics[0], distortions[0], intrinsics[1], distortions[1], size,
+        rotation_01, translation_01, flags=cv2.CALIB_ZERO_DISPARITY, alpha=0)
+    map0 = cv2.initUndistortRectifyMap(
+        intrinsics[0], distortions[0], rect0, proj0[:3, :3], size, cv2.CV_16SC2)
+    map1 = cv2.initUndistortRectifyMap(
+        intrinsics[1], distortions[1], rect1, proj1[:3, :3], size, cv2.CV_16SC2)
+    return map0, map1
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("dataset", type=Path)
     parser.add_argument("--rate", type=float, default=1.0)
     parser.add_argument("--stereo", action="store_true", help="publish exact cam0/cam1 pairs")
+    parser.add_argument("--rectify-euroc", action="store_true",
+                        help="undistort and horizontally rectify EuRoC stereo images")
+    parser.add_argument("--left-topic", default="/d435i/infra1/image_raw")
+    parser.add_argument("--right-topic", default="/d435i/infra2/image_raw")
+    parser.add_argument("--imu-topic", default="/d435i/imu")
     parser.add_argument("--validate-only", action="store_true", help="validate CSV pairing without ROS playback")
     args = parser.parse_args(rospy.myargv()[1:])
 
     if args.rate <= 0:
         raise SystemExit("--rate must be greater than zero")
+    if args.rectify_euroc and not args.stereo:
+        raise SystemExit("--rectify-euroc requires --stereo")
 
     left_rows = read_camera(args.dataset, "cam0")
     right_rows = read_camera(args.dataset, "cam1") if args.stereo else []
@@ -130,11 +167,13 @@ def main():
         print(json.dumps(summary, sort_keys=True))
         return
 
+    rectification_maps = euroc_rectification_maps(args.dataset) if args.rectify_euroc else None
+
     rospy.init_node("euroc_d435i_player")
-    left_pub = rospy.Publisher("/d435i/infra1/image_raw", Image, queue_size=10)
-    right_pub = rospy.Publisher("/d435i/infra2/image_raw", Image, queue_size=10) if args.stereo else None
+    left_pub = rospy.Publisher(args.left_topic, Image, queue_size=10)
+    right_pub = rospy.Publisher(args.right_topic, Image, queue_size=10) if args.stereo else None
     depth_pub = rospy.Publisher("/d435i/depth/image_raw", Image, queue_size=10)
-    imu_pub = rospy.Publisher("/d435i/imu", Imu, queue_size=2000)
+    imu_pub = rospy.Publisher(args.imu_topic, Imu, queue_size=2000)
     bridge = CvBridge()
     time.sleep(3.0)
 
@@ -181,6 +220,9 @@ def main():
                 if left is None or (right_filename is not None and right is None):
                     image_read_failures += 1
                     raise RuntimeError(f"读取双目图像失败: {left_filename}, {right_filename}")
+                if rectification_maps is not None:
+                    left = cv2.remap(left, *rectification_maps[0], interpolation=cv2.INTER_LINEAR)
+                    right = cv2.remap(right, *rectification_maps[1], interpolation=cv2.INTER_LINEAR)
 
                 left_msg = bridge.cv2_to_imgmsg(left, encoding="mono8")
                 left_msg.header.stamp = ros_stamp
