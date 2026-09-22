@@ -33,6 +33,8 @@ int STEREO_USE_METRIC_INIT = 0;
 int STEREO_USE_RIGHT_FACTORS = 0;
 double STEREO_MIN_DEPTH = 0.2;
 double STEREO_MAX_DEPTH = 15.0;
+double STEREO_EPIPOLAR_THRESHOLD = 1.0;
+double STEREO_BACKEND_REPROJECTION_THRESHOLD = 3.0;
 
 template <typename T>
 T readParam(ros::NodeHandle &n, std::string name)
@@ -132,6 +134,9 @@ void readParameters(ros::NodeHandle &n)
     STEREO_USE_RIGHT_FACTORS = readOptionalInt(fsSettings, "stereo_use_right_factors", 0);
     STEREO_MIN_DEPTH = readOptionalDouble(fsSettings, "stereo_min_depth", 0.2);
     STEREO_MAX_DEPTH = readOptionalDouble(fsSettings, "stereo_max_depth", 15.0);
+    STEREO_EPIPOLAR_THRESHOLD = readOptionalDouble(fsSettings, "stereo_epipolar_threshold", 1.0);
+    STEREO_BACKEND_REPROJECTION_THRESHOLD =
+        readOptionalDouble(fsSettings, "stereo_backend_reprojection_threshold", 3.0);
     if ((STEREO_USE_DEPTH_INIT != 0 && STEREO_USE_DEPTH_INIT != 1) ||
         (STEREO_USE_METRIC_INIT != 0 && STEREO_USE_METRIC_INIT != 1) ||
         (STEREO_USE_RIGHT_FACTORS != 0 && STEREO_USE_RIGHT_FACTORS != 1))
@@ -146,6 +151,9 @@ void readParameters(ros::NodeHandle &n)
         throw std::runtime_error("stereo_use_metric_init=1 requires stereo_use_depth_init=1");
     if (STEREO_MIN_DEPTH <= 0.0 || STEREO_MAX_DEPTH <= STEREO_MIN_DEPTH)
         throw std::runtime_error("invalid stereo depth range");
+    if (STEREO_EPIPOLAR_THRESHOLD <= 0.0 ||
+        STEREO_BACKEND_REPROJECTION_THRESHOLD <= 0.0)
+        throw std::runtime_error("stereo observation thresholds must be positive");
     NUM_OF_CAM = STEREO_USE_RIGHT_FACTORS ? 2 : 1;
 
     SOLVER_TIME = fsSettings["max_solver_time"];

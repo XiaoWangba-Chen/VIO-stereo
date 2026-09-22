@@ -54,6 +54,20 @@ TEST(StereoObservation, InitializesOnlyOnceFromAnchor)
     EXPECT_DOUBLE_EQ(3.0, feature.estimated_depth);
 }
 
+TEST(StereoObservation, RemovingRightObservationPreservesLeftTrack)
+{
+    FeaturePerFrame frame(makeObservation(true, 2.5), 0.0);
+    const Eigen::Vector3d left_point = frame.point;
+    const Eigen::Vector2d left_uv = frame.uv;
+    frame.removeRightObservation();
+
+    EXPECT_FALSE(frame.is_stereo);
+    EXPECT_FALSE(frame.has_stereo_depth);
+    EXPECT_TRUE(std::isnan(frame.stereo_depth));
+    EXPECT_TRUE(frame.point.isApprox(left_point));
+    EXPECT_TRUE(frame.uv.isApprox(left_uv));
+}
+
 int main(int argc, char **argv)
 {
     testing::InitGoogleTest(&argc, argv);

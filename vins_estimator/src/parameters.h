@@ -44,6 +44,8 @@ extern int STEREO_USE_METRIC_INIT;
 extern int STEREO_USE_RIGHT_FACTORS;
 extern double STEREO_MIN_DEPTH;
 extern double STEREO_MAX_DEPTH;
+extern double STEREO_EPIPOLAR_THRESHOLD;
+extern double STEREO_BACKEND_REPROJECTION_THRESHOLD;
 
 
 void readParameters(ros::NodeHandle &n);

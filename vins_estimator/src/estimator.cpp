@@ -1,5 +1,87 @@
 #include "estimator.h"
 
+namespace
+{
+Matrix3d rotationFromParameter(const double *pose)
+{
+    return Quaterniond(pose[6], pose[3], pose[4], pose[5]).normalized().toRotationMatrix();
+}
+
+Vector3d translationFromParameter(const double *pose)
+{
+    return Vector3d(pose[0], pose[1], pose[2]);
+}
+
+bool validRightObservation(const FeaturePerFrame &observation)
+{
+    if (!observation.is_stereo || !observation.has_stereo_depth ||
+        !std::isfinite(observation.stereo_depth) ||
+        observation.stereo_depth < STEREO_MIN_DEPTH ||
+        observation.stereo_depth > STEREO_MAX_DEPTH ||
+        !observation.point.array().isFinite().all() ||
+        !observation.right_point.array().isFinite().all() ||
+        !observation.uv.array().isFinite().all() ||
+        !observation.right_uv.array().isFinite().all())
+        return false;
+    if (observation.point.z() <= 0.0 || observation.right_point.z() <= 0.0 ||
+        observation.point.x() / observation.point.z() <=
+            observation.right_point.x() / observation.right_point.z())
+        return false;
+    if (observation.uv.x() < 0.0 || observation.uv.x() >= COL ||
+        observation.uv.y() < 0.0 || observation.uv.y() >= ROW ||
+        observation.right_uv.x() < 0.0 || observation.right_uv.x() >= COL ||
+        observation.right_uv.y() < 0.0 || observation.right_uv.y() >= ROW)
+        return false;
+    return std::abs(observation.uv.y() - observation.right_uv.y()) <=
+           STEREO_EPIPOLAR_THRESHOLD;
+}
+
+bool reprojectionErrorPixels(const Vector3d &anchor_point,
+                             const Vector3d &observation,
+                             double inverse_depth,
+                             const double *pose_i,
+                             const double *pose_j,
+                             const double *extrinsic_i,
+                             const double *extrinsic_j,
+                             double &error_pixels)
+{
+    if (!std::isfinite(inverse_depth) || inverse_depth <= 0.0)
+        return false;
+    const Matrix3d ric_i = rotationFromParameter(extrinsic_i);
+    const Vector3d tic_i = translationFromParameter(extrinsic_i);
+    const Matrix3d ric_j = rotationFromParameter(extrinsic_j);
+    const Vector3d tic_j = translationFromParameter(extrinsic_j);
+    const Vector3d point_camera_i = anchor_point / inverse_depth;
+    const Vector3d point_imu_i = ric_i * point_camera_i + tic_i;
+    Vector3d point_imu_j = point_imu_i;
+    if (pose_i && pose_j)
+    {
+        const Matrix3d Ri = rotationFromParameter(pose_i);
+        const Vector3d Pi = translationFromParameter(pose_i);
+        const Matrix3d Rj = rotationFromParameter(pose_j);
+        const Vector3d Pj = translationFromParameter(pose_j);
+        point_imu_j = Rj.transpose() * (Ri * point_imu_i + Pi - Pj);
+    }
+    const Vector3d point_camera_j = ric_j.transpose() * (point_imu_j - tic_j);
+    if (!point_camera_j.array().isFinite().all() || point_camera_j.z() <= 0.0 ||
+        !observation.array().isFinite().all() || observation.z() <= 0.0)
+        return false;
+    error_pixels = FOCAL_LENGTH *
+        ((point_camera_j / point_camera_j.z()).head<2>() -
+         (observation / observation.z()).head<2>()).norm();
+    return std::isfinite(error_pixels);
+}
+
+double medianError(vector<double> errors)
+{
+    if (errors.empty())
+        return 0.0;
+    const std::size_t middle = errors.size() / 2;
+    std::nth_element(errors.begin(), errors.begin() + middle, errors.end());
+    return errors[middle];
+}
+}
+
 Estimator::Estimator(): f_manager{Rs}
 {
     ROS_INFO("init begins");
@@ -937,6 +1019,7 @@ void Estimator::optimization()
     }
     int f_m_cnt = 0;
     int right_f_m_cnt = 0;
+    int rejected_right_observations = 0;
     int feature_index = -1;
     for (auto &it_per_id : f_manager.feature)
     {
@@ -953,7 +1036,20 @@ void Estimator::optimization()
         for (auto &it_per_frame : it_per_id.feature_per_frame)
         {
             imu_j++;
-            if (STEREO_USE_RIGHT_FACTORS && it_per_frame.is_stereo)
+            double initial_right_error = 0.0;
+            const bool right_geometry_valid = STEREO_USE_RIGHT_FACTORS &&
+                validRightObservation(it_per_frame) && reprojectionErrorPixels(
+                    pts_i, it_per_frame.right_point, para_Feature[feature_index][0],
+                    imu_i == imu_j ? nullptr : para_Pose[imu_i],
+                    imu_i == imu_j ? nullptr : para_Pose[imu_j],
+                    para_Ex_Pose[0], para_Ex_Pose[1], initial_right_error);
+            if (STEREO_USE_RIGHT_FACTORS && it_per_frame.is_stereo &&
+                !right_geometry_valid)
+            {
+                it_per_frame.removeRightObservation();
+                ++rejected_right_observations;
+            }
+            if (STEREO_USE_RIGHT_FACTORS && right_geometry_valid)
             {
                 if (imu_i == imu_j)
                 {
@@ -1061,7 +1157,79 @@ void Estimator::optimization()
     ROS_DEBUG("Iterations : %d", static_cast<int>(summary.iterations.size()));
     ROS_DEBUG("solver costs: %f", t_solver.toc());
 
+    int left_observation_count = 0;
+    int right_observation_count = 0;
+    int stereo_landmark_count = 0;
+    int valid_inverse_depth_count = 0;
+    vector<double> left_errors;
+    vector<double> right_errors;
+    feature_index = -1;
+    for (auto &it_per_id : f_manager.feature)
+    {
+        left_observation_count += static_cast<int>(it_per_id.feature_per_frame.size());
+        it_per_id.used_num = it_per_id.feature_per_frame.size();
+        if (!(it_per_id.used_num >= 2 && it_per_id.start_frame < WINDOW_SIZE - 2))
+            continue;
+
+        ++feature_index;
+        const double inverse_depth = para_Feature[feature_index][0];
+        if (std::isfinite(inverse_depth) && inverse_depth > 0.0)
+            ++valid_inverse_depth_count;
+        const int imu_i = it_per_id.start_frame;
+        int imu_j = imu_i - 1;
+        const Vector3d &anchor_point = it_per_id.feature_per_frame.front().point;
+        for (auto &it_per_frame : it_per_id.feature_per_frame)
+        {
+            ++imu_j;
+            double error_pixels = 0.0;
+            if (imu_j != imu_i && reprojectionErrorPixels(
+                    anchor_point, it_per_frame.point, inverse_depth,
+                    para_Pose[imu_i], para_Pose[imu_j],
+                    para_Ex_Pose[0], para_Ex_Pose[0], error_pixels))
+                left_errors.push_back(error_pixels);
+
+            if (!STEREO_USE_RIGHT_FACTORS || !it_per_frame.is_stereo)
+                continue;
+            const bool valid_geometry = validRightObservation(it_per_frame) &&
+                reprojectionErrorPixels(
+                    anchor_point, it_per_frame.right_point, inverse_depth,
+                    imu_i == imu_j ? nullptr : para_Pose[imu_i],
+                    imu_i == imu_j ? nullptr : para_Pose[imu_j],
+                    para_Ex_Pose[0], para_Ex_Pose[1], error_pixels);
+            if (!valid_geometry || error_pixels > STEREO_BACKEND_REPROJECTION_THRESHOLD)
+            {
+                it_per_frame.removeRightObservation();
+                ++rejected_right_observations;
+                continue;
+            }
+            right_errors.push_back(error_pixels);
+        }
+    }
+    for (const auto &it_per_id : f_manager.feature)
+    {
+        bool has_valid_right = false;
+        for (const auto &it_per_frame : it_per_id.feature_per_frame)
+        {
+            if (!validRightObservation(it_per_frame))
+                continue;
+            ++right_observation_count;
+            has_valid_right = true;
+        }
+        if (has_valid_right)
+            ++stereo_landmark_count;
+    }
+
     double2vector();
+    if (STEREO_USE_RIGHT_FACTORS)
+    {
+        ROS_INFO_THROTTLE(
+            5.0,
+            "stereo backend: left_obs=%d right_obs=%d stereo_landmarks=%d "
+            "valid_inverse_depth=%d left_median=%.3fpx right_median=%.3fpx rejected_right=%d",
+            left_observation_count, right_observation_count, stereo_landmark_count,
+            valid_inverse_depth_count, medianError(left_errors), medianError(right_errors),
+            rejected_right_observations);
+    }
 
     TicToc t_whole_marginalization;
     if (marginalization_flag == MARGIN_OLD)
@@ -1100,6 +1268,7 @@ void Estimator::optimization()
 
         {
             int feature_index = -1;
+            int right_marginalization_count = 0;
             for (auto &it_per_id : f_manager.feature)
             {
                 it_per_id.used_num = it_per_id.feature_per_frame.size();
@@ -1117,7 +1286,7 @@ void Estimator::optimization()
                 for (auto &it_per_frame : it_per_id.feature_per_frame)
                 {
                     imu_j++;
-                    if (STEREO_USE_RIGHT_FACTORS && it_per_frame.is_stereo)
+                    if (STEREO_USE_RIGHT_FACTORS && validRightObservation(it_per_frame))
                     {
                         if (imu_i == imu_j)
                         {
@@ -1141,6 +1310,7 @@ void Estimator::optimization()
                                 vector<int>{0, 4});
                             marginalization_info->addResidualBlockInfo(residual_block_info);
                         }
+                        ++right_marginalization_count;
                     }
                     if (imu_i == imu_j)
                         continue;
@@ -1166,6 +1336,9 @@ void Estimator::optimization()
                     }
                 }
             }
+            if (STEREO_USE_RIGHT_FACTORS)
+                ROS_INFO_THROTTLE(5.0, "right factors added to marginalization: %d",
+                                  right_marginalization_count);
         }
 
         TicToc t_pre_margin;

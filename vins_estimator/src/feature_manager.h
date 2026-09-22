@@ -59,6 +59,16 @@ class FeaturePerFrame
         parallax = 0.0;
         dep_gradient = 0.0;
     }
+
+    void removeRightObservation()
+    {
+        is_stereo = false;
+        has_stereo_depth = false;
+        stereo_depth = std::numeric_limits<double>::quiet_NaN();
+        right_point.setZero();
+        right_uv.setZero();
+        right_velocity.setZero();
+    }
     double cur_td;
     Vector3d point;
     Vector2d uv;

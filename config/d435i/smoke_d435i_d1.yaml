@@ -1,6 +1,6 @@
 %YAML:1.0
 
-# Short D1 sequence using fixed-scale stereo initialization.
+# Short D1 sequence using fixed-scale initialization and left-camera backend only.
 num_of_cam: 2
 imu_topic: "/d435i/imu"
 image_topic: "/d435i/infra1/image_raw"
@@ -68,8 +68,9 @@ visualize_camera_size: 0.4
 stereo_track: 1
 stereo_fb_threshold: 0.5
 stereo_epipolar_threshold: 1.0
+stereo_backend_reprojection_threshold: 3.0
 stereo_min_depth: 0.2
 stereo_max_depth: 15.0
 stereo_use_depth_init: 1
 stereo_use_metric_init: 1
-stereo_use_right_factors: 1
+stereo_use_right_factors: 0
