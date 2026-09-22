@@ -196,6 +196,195 @@ bool LinearAlignment(map<double, ImageFrame> &all_image_frame, Vector3d &g, Vect
         return true;
 }
 
+namespace
+{
+bool solveMetricGyroscopeBias(map<double, ImageFrame> &all_image_frame,
+                              const Vector3d &initial_bg,
+                              Vector3d &solved_bg,
+                              string &failure_reason)
+{
+    Matrix3d A = Matrix3d::Zero();
+    Vector3d b = Vector3d::Zero();
+    for (auto frame_i = all_image_frame.begin();
+         frame_i != all_image_frame.end() && next(frame_i) != all_image_frame.end(); ++frame_i)
+    {
+        auto frame_j = next(frame_i);
+        if (!frame_j->second.pre_integration || frame_j->second.pre_integration->sum_dt <= 0.0)
+        {
+            failure_reason = "missing or empty IMU pre-integration";
+            return false;
+        }
+        const Matrix3d jacobian =
+            frame_j->second.pre_integration->jacobian.block<3, 3>(O_R, O_BG);
+        const Quaterniond visual_delta(frame_i->second.R.transpose() * frame_j->second.R);
+        const Vector3d residual =
+            2.0 * (frame_j->second.pre_integration->delta_q.inverse() * visual_delta).vec();
+        A.noalias() += jacobian.transpose() * jacobian;
+        b.noalias() += jacobian.transpose() * residual;
+    }
+    Eigen::LDLT<Matrix3d> solver(A);
+    if (solver.info() != Eigen::Success)
+    {
+        failure_reason = "gyroscope bias normal equation is singular";
+        return false;
+    }
+    const Vector3d delta_bg = solver.solve(b);
+    solved_bg = initial_bg + delta_bg;
+    if (solver.info() != Eigen::Success || !solved_bg.array().isFinite().all())
+    {
+        failure_reason = "gyroscope bias is not finite";
+        return false;
+    }
+    ROS_INFO_STREAM("stereo metric init gyroscope bias " << solved_bg.transpose());
+    for (auto frame_i = all_image_frame.begin(); frame_i != all_image_frame.end(); ++frame_i)
+    {
+        if (frame_i->second.pre_integration)
+            frame_i->second.pre_integration->repropagate(Vector3d::Zero(), solved_bg);
+    }
+    return true;
+}
+
+bool solveMetricLinearSystem(map<double, ImageFrame> &all_image_frame,
+                             Vector3d &g,
+                             VectorXd &x,
+                             string &failure_reason)
+{
+    const int frame_count = static_cast<int>(all_image_frame.size());
+    const int state_size = frame_count * 3 + 3;
+    MatrixXd A = MatrixXd::Zero(state_size, state_size);
+    VectorXd b = VectorXd::Zero(state_size);
+    int index = 0;
+    for (auto frame_i = all_image_frame.begin(); next(frame_i) != all_image_frame.end();
+         ++frame_i, ++index)
+    {
+        const auto frame_j = next(frame_i);
+        const double dt = frame_j->second.pre_integration->sum_dt;
+        MatrixXd equation = MatrixXd::Zero(6, 9);
+        VectorXd rhs = VectorXd::Zero(6);
+        equation.block<3, 3>(0, 0) = -dt * Matrix3d::Identity();
+        equation.block<3, 3>(0, 6) =
+            frame_i->second.R.transpose() * (dt * dt / 2.0) * Matrix3d::Identity();
+        rhs.head<3>() = frame_j->second.pre_integration->delta_p +
+            frame_i->second.R.transpose() * frame_j->second.R * TIC[0] - TIC[0] -
+            frame_i->second.R.transpose() * (frame_j->second.T - frame_i->second.T);
+        equation.block<3, 3>(3, 0) = -Matrix3d::Identity();
+        equation.block<3, 3>(3, 3) = frame_i->second.R.transpose() * frame_j->second.R;
+        equation.block<3, 3>(3, 6) =
+            frame_i->second.R.transpose() * dt * Matrix3d::Identity();
+        rhs.tail<3>() = frame_j->second.pre_integration->delta_v;
+
+        const MatrixXd normal = equation.transpose() * equation;
+        const VectorXd normal_rhs = equation.transpose() * rhs;
+        A.block<6, 6>(index * 3, index * 3) += normal.topLeftCorner<6, 6>();
+        b.segment<6>(index * 3) += normal_rhs.head<6>();
+        A.bottomRightCorner<3, 3>() += normal.bottomRightCorner<3, 3>();
+        b.tail<3>() += normal_rhs.tail<3>();
+        A.block(index * 3, state_size - 3, 6, 3) += normal.topRightCorner(6, 3);
+        A.block(state_size - 3, index * 3, 3, 6) += normal.bottomLeftCorner(3, 6);
+    }
+    A *= 1000.0;
+    b *= 1000.0;
+    Eigen::LDLT<MatrixXd> solver(A);
+    if (solver.info() != Eigen::Success)
+    {
+        failure_reason = "fixed-scale velocity/gravity system is singular";
+        return false;
+    }
+    x = solver.solve(b);
+    if (solver.info() != Eigen::Success || !x.array().isFinite().all())
+    {
+        failure_reason = "fixed-scale velocity/gravity solution is not finite";
+        return false;
+    }
+    g = x.tail<3>();
+    if (!g.array().isFinite().all() || std::abs(g.norm() - G.norm()) > 1.0)
+    {
+        failure_reason = "fixed-scale gravity norm differs from configuration by more than 1 m/s^2";
+        return false;
+    }
+
+    Vector3d refined_g = g.normalized() * G.norm();
+    VectorXd refined_solution;
+    for (int iteration = 0; iteration < 4; ++iteration)
+    {
+        const MatrixXd basis = TangentBasis(refined_g);
+        const int refined_size = frame_count * 3 + 2;
+        MatrixXd refined_A = MatrixXd::Zero(refined_size, refined_size);
+        VectorXd refined_b = VectorXd::Zero(refined_size);
+        int refined_index = 0;
+        for (auto frame_i = all_image_frame.begin(); next(frame_i) != all_image_frame.end();
+             ++frame_i, ++refined_index)
+        {
+            const auto frame_j = next(frame_i);
+            const double dt = frame_j->second.pre_integration->sum_dt;
+            MatrixXd equation = MatrixXd::Zero(6, 8);
+            VectorXd rhs = VectorXd::Zero(6);
+            equation.block<3, 3>(0, 0) = -dt * Matrix3d::Identity();
+            equation.block<3, 2>(0, 6) =
+                frame_i->second.R.transpose() * (dt * dt / 2.0) * basis;
+            rhs.head<3>() = frame_j->second.pre_integration->delta_p +
+                frame_i->second.R.transpose() * frame_j->second.R * TIC[0] - TIC[0] -
+                frame_i->second.R.transpose() * (frame_j->second.T - frame_i->second.T) -
+                frame_i->second.R.transpose() * (dt * dt / 2.0) * refined_g;
+            equation.block<3, 3>(3, 0) = -Matrix3d::Identity();
+            equation.block<3, 3>(3, 3) = frame_i->second.R.transpose() * frame_j->second.R;
+            equation.block<3, 2>(3, 6) = frame_i->second.R.transpose() * dt * basis;
+            rhs.tail<3>() = frame_j->second.pre_integration->delta_v -
+                frame_i->second.R.transpose() * dt * refined_g;
+
+            const MatrixXd normal = equation.transpose() * equation;
+            const VectorXd normal_rhs = equation.transpose() * rhs;
+            refined_A.block<6, 6>(refined_index * 3, refined_index * 3) +=
+                normal.topLeftCorner<6, 6>();
+            refined_b.segment<6>(refined_index * 3) += normal_rhs.head<6>();
+            refined_A.bottomRightCorner<2, 2>() += normal.bottomRightCorner<2, 2>();
+            refined_b.tail<2>() += normal_rhs.tail<2>();
+            refined_A.block(refined_index * 3, refined_size - 2, 6, 2) +=
+                normal.topRightCorner(6, 2);
+            refined_A.block(refined_size - 2, refined_index * 3, 2, 6) +=
+                normal.bottomLeftCorner(2, 6);
+        }
+        refined_A *= 1000.0;
+        refined_b *= 1000.0;
+        Eigen::LDLT<MatrixXd> refined_solver(refined_A);
+        if (refined_solver.info() != Eigen::Success)
+        {
+            failure_reason = "fixed-scale gravity refinement system is singular";
+            return false;
+        }
+        refined_solution = refined_solver.solve(refined_b);
+        if (!refined_solution.array().isFinite().all())
+        {
+            failure_reason = "refined fixed-scale alignment is not finite";
+            return false;
+        }
+        refined_g = (refined_g + basis * refined_solution.tail<2>()).normalized() * G.norm();
+    }
+    g = refined_g;
+    x.resize(state_size);
+    x.head(frame_count * 3) = refined_solution.head(frame_count * 3);
+    x.tail<3>() = g;
+    return true;
+}
+}
+
+bool MetricVisualIMUAlignment(map<double, ImageFrame> &all_image_frame,
+                              const Vector3d &initial_bg,
+                              Vector3d &solved_bg,
+                              Vector3d &g,
+                              VectorXd &x,
+                              string &failure_reason)
+{
+    if (all_image_frame.size() < 2)
+    {
+        failure_reason = "metric initialization window has fewer than two frames";
+        return false;
+    }
+    if (!solveMetricGyroscopeBias(all_image_frame, initial_bg, solved_bg, failure_reason))
+        return false;
+    return solveMetricLinearSystem(all_image_frame, g, x, failure_reason);
+}
+
 bool VisualIMUAlignment(map<double, ImageFrame> &all_image_frame, Vector3d* Bgs, Vector3d &g, VectorXd &x)
 {
     solveGyroscopeBias(all_image_frame, Bgs);

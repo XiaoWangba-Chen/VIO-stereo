@@ -42,6 +42,8 @@ extern double ROW, COL;
 extern int STEREO_USE_DEPTH_INIT;
 extern int STEREO_USE_METRIC_INIT;
 extern int STEREO_USE_RIGHT_FACTORS;
+extern double STEREO_MIN_DEPTH;
+extern double STEREO_MAX_DEPTH;
 
 
 void readParameters(ros::NodeHandle &n);

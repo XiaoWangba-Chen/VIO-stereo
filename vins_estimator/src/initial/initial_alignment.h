@@ -27,3 +27,12 @@ class ImageFrame
 };
 
 bool VisualIMUAlignment(map<double, ImageFrame> &all_image_frame, Vector3d* Bgs, Vector3d &g, VectorXd &x);
+
+// Fixed-scale stereo alignment. x contains only one local velocity per frame
+// followed by gravity; unlike VisualIMUAlignment it has no scale component.
+bool MetricVisualIMUAlignment(map<double, ImageFrame> &all_image_frame,
+                              const Vector3d &initial_bg,
+                              Vector3d &solved_bg,
+                              Vector3d &g,
+                              VectorXd &x,
+                              string &failure_reason);

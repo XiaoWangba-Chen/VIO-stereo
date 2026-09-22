@@ -8,6 +8,7 @@
 #include "initial/initial_sfm.h"
 #include "initial/initial_alignment.h"
 #include "initial/initial_ex_rotation.h"
+#include "initial/stereo_metric_init.h"
 #include <std_msgs/Header.h>
 #include <std_msgs/Float32.h>
 
@@ -39,6 +40,7 @@ class Estimator
     // internal
     void clearState();
     bool initialStructure();
+    bool stereoMetricInitialStructure();
     bool visualInitialAlign();
     bool relativePose(Matrix3d &relative_R, Vector3d &relative_T, int &l);
     void slideWindow();

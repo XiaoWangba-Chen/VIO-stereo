@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -lt 1 || ! "$1" =~ ^[A-Za-z0-9._-]+$ ]]; then
-  echo "用法: $0 序列名 [--headless] [--mode a1|b0|b1|b2|c1] [--rate 正数] [--image 镜像] [--label 标签] [--validate-depth]" >&2
+  echo "用法: $0 序列名 [--headless] [--mode a1|b0|b1|b2|c1|d1] [--rate 正数] [--image 镜像] [--label 标签] [--validate-depth]" >&2
   exit 2
 fi
 
@@ -23,8 +23,8 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --mode)
-      if [[ $# -lt 2 || ( "$2" != "a1" && "$2" != "b0" && "$2" != "b1" && "$2" != "b2" && "$2" != "c1" ) ]]; then
-        echo "--mode 必须是 a1、b0、b1、b2 或 c1" >&2
+      if [[ $# -lt 2 || ( "$2" != "a1" && "$2" != "b0" && "$2" != "b1" && "$2" != "b2" && "$2" != "c1" && "$2" != "d1" ) ]]; then
+        echo "--mode 必须是 a1、b0、b1、b2、c1 或 d1" >&2
         exit 2
       fi
       mode="$2"
@@ -87,8 +87,8 @@ if [[ "${mode}" != "a1" && ! -f "${dataset_dir}/mav0/cam1/data.csv" ]]; then
   exit 1
 fi
 if [[ "${validate_depth}" -eq 1 ]]; then
-  if [[ "${mode}" != "b1" && "${mode}" != "b2" && "${mode}" != "c1" ]]; then
-    echo "--validate-depth 仅支持 b1、b2 或 c1 模式" >&2
+  if [[ "${mode}" != "b1" && "${mode}" != "b2" && "${mode}" != "c1" && "${mode}" != "d1" ]]; then
+    echo "--validate-depth 仅支持 b1、b2、c1 或 d1 模式" >&2
     exit 2
   fi
   if [[ ! -f "${dataset_dir}/mav0/depth0/data.csv" ]]; then
@@ -142,7 +142,7 @@ docker run "${docker_args[@]}" \
     trap shutdown_launch EXIT INT TERM
     sleep 5
     validator_pid=""
-    if [[ "${VINS_PHASE1_MODE}" == "b1" || "${VINS_PHASE1_MODE}" == "b2" || "${VINS_PHASE1_MODE}" == "c1" ]]; then
+    if [[ "${VINS_PHASE1_MODE}" == "b1" || "${VINS_PHASE1_MODE}" == "b2" || "${VINS_PHASE1_MODE}" == "c1" || "${VINS_PHASE1_MODE}" == "d1" ]]; then
       validator_args=(--output /tmp/vins_output/stereo_diagnostics.json
                       --min-candidates "${VINS_MIN_STEREO_CANDIDATES}")
       if [[ "${VINS_VALIDATE_DEPTH}" == "1" ]]; then
@@ -166,7 +166,7 @@ docker run "${docker_args[@]}" \
       wait ${player_pid} 2>/dev/null || true
     fi
     # 保持 B1 工作线程和诊断订阅者存活，让播放结束时的少量匹配任务排空。
-    if [[ "${VINS_PHASE1_MODE}" == "b1" || "${VINS_PHASE1_MODE}" == "b2" || "${VINS_PHASE1_MODE}" == "c1" ]]; then
+    if [[ "${VINS_PHASE1_MODE}" == "b1" || "${VINS_PHASE1_MODE}" == "b2" || "${VINS_PHASE1_MODE}" == "c1" || "${VINS_PHASE1_MODE}" == "d1" ]]; then
       sleep 10
     fi
     if [[ -n "${validator_pid}" ]]; then

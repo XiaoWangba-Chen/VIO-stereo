@@ -169,7 +169,10 @@ void Estimator::processImage(const FeatureFrameObservations &image, const std_ms
             bool result = false;
             if( ESTIMATE_EXTRINSIC != 2 && (header.stamp.toSec() - initial_timestamp) > 0.1)
             {
-               result = initialStructure();
+               if (STEREO_USE_METRIC_INIT)
+                   result = stereoMetricInitialStructure();
+               else
+                   result = initialStructure();
                initial_timestamp = header.stamp.toSec();
             }
             if(result)
@@ -221,6 +224,208 @@ void Estimator::processImage(const FeatureFrameObservations &image, const std_ms
         last_R0 = Rs[0];
         last_P0 = Ps[0];
     }
+}
+
+bool Estimator::stereoMetricInitialStructure()
+{
+    if (solver_flag != INITIAL)
+    {
+        ROS_ERROR("stereo metric initialization was requested outside INITIAL state");
+        return false;
+    }
+    if (FEATURE_CAMERA_COUNT != 2 || !STEREO_USE_METRIC_INIT)
+    {
+        ROS_ERROR("invalid stereo metric initialization configuration");
+        return false;
+    }
+    if (frame_count != WINDOW_SIZE)
+    {
+        ROS_INFO("stereo metric init waiting for full window: %d/%d",
+                 frame_count + 1, WINDOW_SIZE + 1);
+        return false;
+    }
+
+    vector<ImageFrame *> frames;
+    frames.reserve(frame_count + 1);
+    map<double, ImageFrame> metric_frames;
+    double previous_timestamp = -std::numeric_limits<double>::infinity();
+    for (int index = 0; index <= frame_count; ++index)
+    {
+        const double timestamp = Headers[index].stamp.toSec();
+        auto frame = all_image_frame.find(timestamp);
+        if (frame == all_image_frame.end())
+        {
+            ROS_WARN("stereo metric init failed: image/IMU window timestamp mismatch");
+            return false;
+        }
+        if (!std::isfinite(timestamp) || timestamp <= previous_timestamp)
+        {
+            ROS_WARN("stereo metric init failed: image timestamps are not strictly increasing");
+            return false;
+        }
+        if (index > 0 && (!frame->second.pre_integration ||
+                          frame->second.pre_integration->sum_dt <= 0.0))
+        {
+            ROS_WARN("stereo metric init failed: incomplete IMU pre-integration at frame %d", index);
+            return false;
+        }
+        if (!pre_integrations[index])
+        {
+            ROS_WARN("stereo metric init failed: missing estimator pre-integration at frame %d", index);
+            return false;
+        }
+        previous_timestamp = timestamp;
+        frames.push_back(&frame->second);
+        metric_frames.emplace(timestamp, frame->second);
+    }
+
+    ROS_INFO("stereo metric init window frames: %zu", frames.size());
+    StereoMetricLandmarks landmarks;
+    vector<Matrix3d> camera_rotations(frames.size(), Matrix3d::Identity());
+    vector<Vector3d> camera_positions(frames.size(), Vector3d::Zero());
+    const int first_valid_depths = countValidStereoMetricObservations(
+        frames.front()->points, STEREO_MIN_DEPTH, STEREO_MAX_DEPTH);
+    addStereoMetricLandmarks(
+        frames.front()->points, camera_rotations.front(), camera_positions.front(),
+        STEREO_MIN_DEPTH, STEREO_MAX_DEPTH, landmarks);
+    ROS_INFO("stereo metric init frame 0 valid depths: %d, metric landmarks: %zu",
+             first_valid_depths, landmarks.size());
+    if (landmarks.size() < 20)
+    {
+        ROS_WARN("stereo metric init failed: first frame has fewer than 20 metric landmarks");
+        return false;
+    }
+
+    for (std::size_t index = 1; index < frames.size(); ++index)
+    {
+        camera_rotations[index] = camera_rotations[index - 1];
+        camera_positions[index] = camera_positions[index - 1];
+        StereoMetricPnPStats stats;
+        string failure_reason;
+        if (!solveStereoMetricPnP(landmarks, frames[index]->points,
+                                  camera_rotations[index], camera_positions[index],
+                                  stats, failure_reason))
+        {
+            ROS_WARN("stereo metric init failed at frame %zu: %s (correspondences=%d, inliers=%d)",
+                     index, failure_reason.c_str(), stats.correspondences, stats.inliers);
+            return false;
+        }
+        ROS_INFO("stereo metric init PnP frame %zu: correspondences=%d, inliers=%d, median=%.3f px",
+                 index, stats.correspondences, stats.inliers,
+                 stats.median_reprojection_error_px);
+        const int valid_depths = countValidStereoMetricObservations(
+            frames[index]->points, STEREO_MIN_DEPTH, STEREO_MAX_DEPTH);
+        const int added = addStereoMetricLandmarks(
+            frames[index]->points, camera_rotations[index], camera_positions[index],
+            STEREO_MIN_DEPTH, STEREO_MAX_DEPTH, landmarks);
+        ROS_INFO("stereo metric init frame %zu valid depths: %d, new landmarks: %d, metric landmarks: %zu",
+                 index, valid_depths, added, landmarks.size());
+    }
+
+    int index = 0;
+    for (auto &timestamp_frame : metric_frames)
+    {
+        timestamp_frame.second.R = camera_rotations[index] * RIC[0].transpose();
+        timestamp_frame.second.T = camera_positions[index];
+        timestamp_frame.second.is_key_frame = true;
+        ++index;
+    }
+
+    const Vector3d original_bg = Bgs[0];
+    Vector3d solved_bg;
+    Vector3d solved_g;
+    VectorXd alignment;
+    string failure_reason;
+    if (!MetricVisualIMUAlignment(metric_frames, original_bg, solved_bg,
+                                  solved_g, alignment, failure_reason))
+    {
+        for (auto &timestamp_frame : metric_frames)
+            if (timestamp_frame.second.pre_integration)
+                timestamp_frame.second.pre_integration->repropagate(Vector3d::Zero(), original_bg);
+        ROS_WARN("stereo metric init failed: %s", failure_reason.c_str());
+        return false;
+    }
+    if (alignment.size() != static_cast<int>(frames.size() * 3 + 3) ||
+        !alignment.array().isFinite().all() || !solved_g.array().isFinite().all() ||
+        std::abs(solved_g.norm() - G.norm()) > 1.0)
+    {
+        for (auto &timestamp_frame : metric_frames)
+            if (timestamp_frame.second.pre_integration)
+                timestamp_frame.second.pre_integration->repropagate(Vector3d::Zero(), original_bg);
+        ROS_WARN("stereo metric init failed: invalid fixed-scale alignment result");
+        return false;
+    }
+    ROS_INFO_STREAM("stereo metric init gravity " << solved_g.transpose()
+                    << ", norm=" << solved_g.norm());
+
+    const Matrix3d first_body_rotation = camera_rotations[0] * RIC[0].transpose();
+    const Vector3d first_body_position = camera_positions[0] - first_body_rotation * TIC[0];
+    Matrix3d world_rotation = Utility::g2R(solved_g);
+    const double yaw = Utility::R2ypr(world_rotation * first_body_rotation).x();
+    world_rotation = Utility::ypr2R(Vector3d(-yaw, 0.0, 0.0)) * world_rotation;
+    const Vector3d candidate_g = world_rotation * solved_g;
+    vector<Matrix3d> candidate_rotations(frame_count + 1);
+    vector<Vector3d> candidate_positions(frame_count + 1);
+    vector<Vector3d> candidate_velocities(frame_count + 1);
+
+    for (int frame_index = 0; frame_index <= frame_count; ++frame_index)
+    {
+        const Matrix3d body_rotation = camera_rotations[frame_index] * RIC[0].transpose();
+        const Vector3d body_position = camera_positions[frame_index] - body_rotation * TIC[0];
+        candidate_rotations[frame_index] = world_rotation * body_rotation;
+        candidate_positions[frame_index] = world_rotation * (body_position - first_body_position);
+        candidate_velocities[frame_index] =
+            world_rotation * body_rotation * alignment.segment<3>(frame_index * 3);
+        if (!candidate_rotations[frame_index].array().isFinite().all() ||
+            !candidate_positions[frame_index].array().isFinite().all() ||
+            !candidate_velocities[frame_index].array().isFinite().all())
+        {
+            for (auto &timestamp_frame : metric_frames)
+                if (timestamp_frame.second.pre_integration)
+                    timestamp_frame.second.pre_integration->repropagate(Vector3d::Zero(), original_bg);
+            ROS_WARN("stereo metric init failed: non-finite state at frame %d", frame_index);
+            return false;
+        }
+    }
+
+    // All checks passed. From here onward commit the candidate state together.
+    g = candidate_g;
+    for (int frame_index = 0; frame_index <= frame_count; ++frame_index)
+    {
+        Rs[frame_index] = candidate_rotations[frame_index];
+        Ps[frame_index] = candidate_positions[frame_index];
+        Vs[frame_index] = candidate_velocities[frame_index];
+        Bgs[frame_index] = solved_bg;
+        ROS_INFO_STREAM("stereo metric init velocity frame " << frame_index << ": "
+                        << Vs[frame_index].transpose());
+        pre_integrations[frame_index]->repropagate(Bas[frame_index], Bgs[frame_index]);
+
+        ImageFrame &stored_frame = all_image_frame[Headers[frame_index].stamp.toSec()];
+        stored_frame.R = Rs[frame_index];
+        stored_frame.T = world_rotation * (camera_positions[frame_index] - first_body_position);
+        stored_frame.is_key_frame = true;
+    }
+
+    // Commit metric inverse-depth state only after every pose/velocity passed
+    // validation. The optimizer stores depth, and parameterizes its reciprocal.
+    for (auto &feature : f_manager.feature)
+    {
+        const auto landmark = landmarks.find(feature.feature_id);
+        if (landmark == landmarks.end() || feature.start_frame < 0 ||
+            feature.start_frame > frame_count)
+            continue;
+        const int anchor = feature.start_frame;
+        const Vector3d point_anchor = camera_rotations[anchor].transpose() *
+            (landmark->second - camera_positions[anchor]);
+        if (!point_anchor.array().isFinite().all() || point_anchor.z() <= 0.0)
+            continue;
+        feature.estimated_depth = point_anchor.z();
+        feature.stereo_depth_initialized = true;
+        feature.solve_flag = 1;
+    }
+    ROS_INFO("stereo metric initialization succeeded: landmarks=%zu, no scale state",
+             landmarks.size());
+    return true;
 }
 bool Estimator::initialStructure()
 {

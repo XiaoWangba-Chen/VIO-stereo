@@ -48,6 +48,7 @@ add_executable(vins_estimator
     src/utility/CameraPoseVisualization.cpp
     src/initial/solve_5pts.cpp
     src/initial/initial_aligment.cpp
+    src/initial/stereo_metric_init.cpp
     src/initial/initial_sfm.cpp
     src/initial/initial_ex_rotation.cpp
     )
@@ -67,5 +68,12 @@ if(CATKIN_ENABLE_TESTING)
   if(TARGET projection_stereo_factor_test)
     target_link_libraries(projection_stereo_factor_test projection_stereo_factor_test_support
       ${catkin_LIBRARIES} ${CERES_LIBRARIES})
+  endif()
+  add_library(stereo_metric_init_test_support STATIC
+    src/initial/stereo_metric_init.cpp)
+  catkin_add_gtest(stereo_metric_init_test tests/stereo_metric_init_test.cpp)
+  if(TARGET stereo_metric_init_test)
+    target_link_libraries(stereo_metric_init_test stereo_metric_init_test_support
+      ${catkin_LIBRARIES} ${OpenCV_LIBS})
   endif()
 endif()

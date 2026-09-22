@@ -31,6 +31,8 @@ int FEATURE_CAMERA_COUNT = 1;
 int STEREO_USE_DEPTH_INIT = 0;
 int STEREO_USE_METRIC_INIT = 0;
 int STEREO_USE_RIGHT_FACTORS = 0;
+double STEREO_MIN_DEPTH = 0.2;
+double STEREO_MAX_DEPTH = 15.0;
 
 template <typename T>
 T readParam(ros::NodeHandle &n, std::string name)
@@ -54,6 +56,13 @@ int readOptionalInt(const cv::FileStorage &settings, const std::string &name, in
 {
     const cv::FileNode node = settings[name];
     return node.empty() ? default_value : static_cast<int>(node);
+}
+
+double readOptionalDouble(const cv::FileStorage &settings, const std::string &name,
+                          double default_value)
+{
+    const cv::FileNode node = settings[name];
+    return node.empty() ? default_value : static_cast<double>(node);
 }
 
 void readExtrinsic(const cv::FileStorage &settings, int camera_id,
@@ -121,10 +130,22 @@ void readParameters(ros::NodeHandle &n)
     STEREO_USE_DEPTH_INIT = readOptionalInt(fsSettings, "stereo_use_depth_init", 0);
     STEREO_USE_METRIC_INIT = readOptionalInt(fsSettings, "stereo_use_metric_init", 0);
     STEREO_USE_RIGHT_FACTORS = readOptionalInt(fsSettings, "stereo_use_right_factors", 0);
+    STEREO_MIN_DEPTH = readOptionalDouble(fsSettings, "stereo_min_depth", 0.2);
+    STEREO_MAX_DEPTH = readOptionalDouble(fsSettings, "stereo_max_depth", 15.0);
+    if ((STEREO_USE_DEPTH_INIT != 0 && STEREO_USE_DEPTH_INIT != 1) ||
+        (STEREO_USE_METRIC_INIT != 0 && STEREO_USE_METRIC_INIT != 1) ||
+        (STEREO_USE_RIGHT_FACTORS != 0 && STEREO_USE_RIGHT_FACTORS != 1))
+        throw std::runtime_error("stereo mode switches must be 0 or 1");
     if (STEREO_USE_DEPTH_INIT && FEATURE_CAMERA_COUNT != 2)
         throw std::runtime_error("stereo_use_depth_init=1 requires num_of_cam=2");
     if (STEREO_USE_RIGHT_FACTORS && FEATURE_CAMERA_COUNT != 2)
         throw std::runtime_error("stereo_use_right_factors=1 requires num_of_cam=2");
+    if (STEREO_USE_METRIC_INIT && FEATURE_CAMERA_COUNT != 2)
+        throw std::runtime_error("stereo_use_metric_init=1 requires num_of_cam=2");
+    if (STEREO_USE_METRIC_INIT && !STEREO_USE_DEPTH_INIT)
+        throw std::runtime_error("stereo_use_metric_init=1 requires stereo_use_depth_init=1");
+    if (STEREO_MIN_DEPTH <= 0.0 || STEREO_MAX_DEPTH <= STEREO_MIN_DEPTH)
+        throw std::runtime_error("invalid stereo depth range");
     NUM_OF_CAM = STEREO_USE_RIGHT_FACTORS ? 2 : 1;
 
     SOLVER_TIME = fsSettings["max_solver_time"];
@@ -216,8 +237,6 @@ void readParameters(ros::NodeHandle &n)
             throw std::runtime_error("phase-1 stereo requires estimate_td=0");
         if (ROLLING_SHUTTER != 0)
             throw std::runtime_error("phase-1 stereo requires rolling_shutter=0");
-        if (STEREO_USE_METRIC_INIT)
-            throw std::runtime_error("metric stereo initialization is not implemented");
         validateStereoExtrinsics();
         if (STEREO_USE_RIGHT_FACTORS)
             ROS_INFO("stereo estimator uses fixed camera 0 and camera 1 reprojection factors");
