@@ -231,6 +231,8 @@ void readParameters(ros::NodeHandle &n)
         throw std::runtime_error("stereo_track=1 requires num_of_cam=2");
     if (STEREO_USE_DEPTH_INIT && NUM_OF_CAM != 2)
         throw std::runtime_error("stereo_use_depth_init=1 requires num_of_cam=2");
+    if (STEREO_USE_RIGHT_FACTORS && NUM_OF_CAM != 2)
+        throw std::runtime_error("stereo_use_right_factors=1 requires num_of_cam=2");
 
     if (NUM_OF_CAM == 2)
     {
@@ -239,8 +241,10 @@ void readParameters(ros::NodeHandle &n)
         CAM_NAMES.push_back(cam1_calib);
         if (STEREO_USE_DEPTH_INIT && !STEREO_TRACK)
             throw std::runtime_error("stereo_use_depth_init=1 requires stereo_track=1");
-        if (STEREO_USE_METRIC_INIT || STEREO_USE_RIGHT_FACTORS)
-            throw std::runtime_error("metric stereo initialization and right factors are not implemented in phase B2");
+        if (STEREO_USE_RIGHT_FACTORS && !STEREO_TRACK)
+            throw std::runtime_error("stereo_use_right_factors=1 requires stereo_track=1");
+        if (STEREO_USE_METRIC_INIT)
+            throw std::runtime_error("metric stereo initialization is not implemented");
         validateStereoIntrinsics(CAM_NAMES[0], CAM_NAMES[1]);
         if (STEREO_TRACK)
             STEREO_BASELINE_X = readAndValidateStereoBaseline(fsSettings);

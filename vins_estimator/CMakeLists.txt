@@ -40,6 +40,7 @@ add_executable(vins_estimator
     src/feature_manager.cpp
     src/factor/pose_local_parameterization.cpp
     src/factor/projection_factor.cpp
+    src/factor/projection_stereo_factor.cpp
     src/factor/projection_td_factor.cpp
     src/factor/marginalization_factor.cpp
     src/utility/utility.cpp
@@ -59,5 +60,12 @@ if(CATKIN_ENABLE_TESTING)
   if(TARGET stereo_observation_test)
     target_link_libraries(stereo_observation_test ${catkin_LIBRARIES})
   endif()
+  add_library(projection_stereo_factor_test_support STATIC
+    src/factor/projection_stereo_factor.cpp
+    src/factor/projection_factor.cpp)
+  catkin_add_gtest(projection_stereo_factor_test tests/projection_stereo_factor_test.cpp)
+  if(TARGET projection_stereo_factor_test)
+    target_link_libraries(projection_stereo_factor_test projection_stereo_factor_test_support
+      ${catkin_LIBRARIES} ${CERES_LIBRARIES})
+  endif()
 endif()
-

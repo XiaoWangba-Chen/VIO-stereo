@@ -123,6 +123,9 @@ void readParameters(ros::NodeHandle &n)
     STEREO_USE_RIGHT_FACTORS = readOptionalInt(fsSettings, "stereo_use_right_factors", 0);
     if (STEREO_USE_DEPTH_INIT && FEATURE_CAMERA_COUNT != 2)
         throw std::runtime_error("stereo_use_depth_init=1 requires num_of_cam=2");
+    if (STEREO_USE_RIGHT_FACTORS && FEATURE_CAMERA_COUNT != 2)
+        throw std::runtime_error("stereo_use_right_factors=1 requires num_of_cam=2");
+    NUM_OF_CAM = STEREO_USE_RIGHT_FACTORS ? 2 : 1;
 
     SOLVER_TIME = fsSettings["max_solver_time"];
     NUM_ITERATIONS = fsSettings["max_num_iterations"];
@@ -213,10 +216,13 @@ void readParameters(ros::NodeHandle &n)
             throw std::runtime_error("phase-1 stereo requires estimate_td=0");
         if (ROLLING_SHUTTER != 0)
             throw std::runtime_error("phase-1 stereo requires rolling_shutter=0");
-        if (STEREO_USE_METRIC_INIT || STEREO_USE_RIGHT_FACTORS)
-            throw std::runtime_error("metric stereo initialization and right factors are not implemented in phase B2");
+        if (STEREO_USE_METRIC_INIT)
+            throw std::runtime_error("metric stereo initialization is not implemented");
         validateStereoExtrinsics();
-        ROS_INFO("stereo estimator uses camera 0 residuals only; feature message camera stride is 2");
+        if (STEREO_USE_RIGHT_FACTORS)
+            ROS_INFO("stereo estimator uses fixed camera 0 and camera 1 reprojection factors");
+        else
+            ROS_INFO("stereo estimator uses camera 0 residuals only; feature message camera stride is 2");
     }
     
     fsSettings.release();

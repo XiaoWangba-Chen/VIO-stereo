@@ -731,6 +731,7 @@ void Estimator::optimization()
         problem.AddResidualBlock(imu_factor, NULL, para_Pose[i], para_SpeedBias[i], para_Pose[j], para_SpeedBias[j]);
     }
     int f_m_cnt = 0;
+    int right_f_m_cnt = 0;
     int feature_index = -1;
     for (auto &it_per_id : f_manager.feature)
     {
@@ -747,6 +748,25 @@ void Estimator::optimization()
         for (auto &it_per_frame : it_per_id.feature_per_frame)
         {
             imu_j++;
+            if (STEREO_USE_RIGHT_FACTORS && it_per_frame.is_stereo)
+            {
+                if (imu_i == imu_j)
+                {
+                    ProjectionOneFrameTwoCamFactor *f =
+                        new ProjectionOneFrameTwoCamFactor(pts_i, it_per_frame.right_point);
+                    problem.AddResidualBlock(f, loss_function, para_Ex_Pose[0], para_Ex_Pose[1],
+                                             para_Feature[feature_index]);
+                }
+                else
+                {
+                    ProjectionTwoFrameTwoCamFactor *f =
+                        new ProjectionTwoFrameTwoCamFactor(pts_i, it_per_frame.right_point);
+                    problem.AddResidualBlock(f, loss_function, para_Pose[imu_i], para_Pose[imu_j],
+                                             para_Ex_Pose[0], para_Ex_Pose[1],
+                                             para_Feature[feature_index]);
+                }
+                right_f_m_cnt++;
+            }
             if (imu_i == imu_j)
             {
                 continue;
@@ -778,6 +798,8 @@ void Estimator::optimization()
     }
 
     ROS_DEBUG("visual measurement count: %d", f_m_cnt);
+    if (STEREO_USE_RIGHT_FACTORS)
+        ROS_INFO_THROTTLE(5.0, "right visual measurement count: %d", right_f_m_cnt);
     ROS_DEBUG("prepare for ceres: %f", t_prepare.toc());
 
     if(relocalization_info)
@@ -890,6 +912,31 @@ void Estimator::optimization()
                 for (auto &it_per_frame : it_per_id.feature_per_frame)
                 {
                     imu_j++;
+                    if (STEREO_USE_RIGHT_FACTORS && it_per_frame.is_stereo)
+                    {
+                        if (imu_i == imu_j)
+                        {
+                            ProjectionOneFrameTwoCamFactor *f =
+                                new ProjectionOneFrameTwoCamFactor(pts_i, it_per_frame.right_point);
+                            ResidualBlockInfo *residual_block_info = new ResidualBlockInfo(
+                                f, loss_function,
+                                vector<double *>{para_Ex_Pose[0], para_Ex_Pose[1], para_Feature[feature_index]},
+                                vector<int>{2});
+                            marginalization_info->addResidualBlockInfo(residual_block_info);
+                        }
+                        else
+                        {
+                            ProjectionTwoFrameTwoCamFactor *f =
+                                new ProjectionTwoFrameTwoCamFactor(pts_i, it_per_frame.right_point);
+                            ResidualBlockInfo *residual_block_info = new ResidualBlockInfo(
+                                f, loss_function,
+                                vector<double *>{para_Pose[imu_i], para_Pose[imu_j],
+                                                 para_Ex_Pose[0], para_Ex_Pose[1],
+                                                 para_Feature[feature_index]},
+                                vector<int>{0, 4});
+                            marginalization_info->addResidualBlockInfo(residual_block_info);
+                        }
+                    }
                     if (imu_i == imu_j)
                         continue;
 
