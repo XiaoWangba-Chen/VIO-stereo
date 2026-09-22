@@ -389,7 +389,7 @@ bool Estimator::visualInitialAlign()
     f_manager.clearDepth(dep);
 
     //triangulat on cam pose , no tic
-    Vector3d TIC_TMP[NUM_OF_CAM];
+    Vector3d TIC_TMP[MAX_NUM_OF_CAM];
     for(int i = 0; i < NUM_OF_CAM; i++)
         TIC_TMP[i].setZero();
     ric[0] = RIC[0];
@@ -1144,4 +1144,3 @@ void Estimator::setReloFrame(double _frame_stamp, int _frame_index, vector<Vecto
         }
     }
 }
-

@@ -297,8 +297,8 @@ void process()
             for (unsigned int i = 0; i < img_msg->points.size(); i++)
             {
                 int v = img_msg->channels[0].values[i] + 0.5;
-                int feature_id = v / NUM_OF_CAM;
-                int camera_id = v % NUM_OF_CAM;
+                int feature_id = v / FEATURE_CAMERA_COUNT;
+                int camera_id = v % FEATURE_CAMERA_COUNT;
                 double x = img_msg->points[i].x;
                 double y = img_msg->points[i].y;
                 double z = img_msg->points[i].z;
@@ -343,7 +343,15 @@ int main(int argc, char **argv)
     ros::init(argc, argv, "vins_estimator");
     ros::NodeHandle n("~");
     ros::console::set_logger_level(ROSCONSOLE_DEFAULT_NAME, ros::console::levels::Info);
-    readParameters(n);
+    try
+    {
+        readParameters(n);
+    }
+    catch (const std::exception &error)
+    {
+        ROS_FATAL("invalid estimator configuration: %s", error.what());
+        return 1;
+    }
     estimator.setParameter();
 #ifdef EIGEN_DONT_PARALLELIZE
     ROS_DEBUG("EIGEN_DONT_PARALLELIZE");

@@ -2,7 +2,14 @@
 .agents
 .codex
 build
+build*
 devel
+devel*
 install
+install*
 log
-
+logs
+datasets
+outputs
+**/__pycache__
+**/*.pyc

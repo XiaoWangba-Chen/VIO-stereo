@@ -1,5 +1,9 @@
 #include "parameters.h"
 
+#include <algorithm>
+#include <cmath>
+#include <stdexcept>
+
 double INIT_DEPTH;
 double MIN_PARALLAX;
 double ACC_N, ACC_W;
@@ -22,6 +26,11 @@ std::string VINS_RESULT_PATH;
 std::string IMU_TOPIC;
 double ROW, COL;
 double TD, TR;
+int NUM_OF_CAM = 1;
+int FEATURE_CAMERA_COUNT = 1;
+int STEREO_USE_DEPTH_INIT = 0;
+int STEREO_USE_METRIC_INIT = 0;
+int STEREO_USE_RIGHT_FACTORS = 0;
 
 template <typename T>
 T readParam(ros::NodeHandle &n, std::string name)
@@ -39,6 +48,59 @@ T readParam(ros::NodeHandle &n, std::string name)
     return ans;
 }
 
+namespace
+{
+int readOptionalInt(const cv::FileStorage &settings, const std::string &name, int default_value)
+{
+    const cv::FileNode node = settings[name];
+    return node.empty() ? default_value : static_cast<int>(node);
+}
+
+void readExtrinsic(const cv::FileStorage &settings, int camera_id,
+                   Eigen::Matrix3d &rotation, Eigen::Vector3d &translation)
+{
+    const std::string suffix = camera_id == 0 ? "" : std::to_string(camera_id);
+    const std::string rotation_name = "extrinsicRotation" + suffix;
+    const std::string translation_name = "extrinsicTranslation" + suffix;
+    if (settings[rotation_name].empty() || settings[translation_name].empty())
+        throw std::runtime_error("missing stereo extrinsic: " + rotation_name + " or " + translation_name);
+
+    cv::Mat cv_rotation;
+    cv::Mat cv_translation;
+    settings[rotation_name] >> cv_rotation;
+    settings[translation_name] >> cv_translation;
+    if (cv_rotation.rows != 3 || cv_rotation.cols != 3 ||
+        cv_translation.rows != 3 || cv_translation.cols != 1)
+        throw std::runtime_error("invalid dimensions for " + rotation_name + " or " + translation_name);
+
+    cv::cv2eigen(cv_rotation, rotation);
+    cv::cv2eigen(cv_translation, translation);
+    rotation = Eigen::Quaterniond(rotation).normalized().toRotationMatrix();
+}
+
+void validateStereoExtrinsics()
+{
+    const Eigen::Matrix3d relative_rotation = RIC[1].transpose() * RIC[0];
+    const double cosine = std::max(-1.0, std::min(1.0, (relative_rotation.trace() - 1.0) / 2.0));
+    const double angle_degrees = std::acos(cosine) * 180.0 / 3.14159265358979323846;
+    const Eigen::Vector3d baseline_cam0 = RIC[0].transpose() * (TIC[1] - TIC[0]);
+    const double baseline = baseline_cam0.norm();
+    const double transverse = baseline_cam0.tail<2>().norm();
+
+    if (angle_degrees > 1.0)
+        throw std::runtime_error("stereo relative rotation exceeds 1 degree");
+    if (baseline <= 0.01)
+        throw std::runtime_error("stereo baseline must be greater than 1 cm");
+    if (baseline_cam0.x() <= 0.0)
+        throw std::runtime_error("stereo baseline x component must be positive");
+    if (transverse > baseline * 0.05)
+        throw std::runtime_error("stereo baseline y/z component exceeds 5 percent");
+
+    ROS_INFO("validated stereo extrinsics: baseline=[%.9f %.9f %.9f] m, length=%.9f m, rotation=%.6f deg",
+             baseline_cam0.x(), baseline_cam0.y(), baseline_cam0.z(), baseline, angle_degrees);
+}
+}
+
 void readParameters(ros::NodeHandle &n)
 {
     std::string config_file;
@@ -46,10 +108,19 @@ void readParameters(ros::NodeHandle &n)
     cv::FileStorage fsSettings(config_file, cv::FileStorage::READ);
     if(!fsSettings.isOpened())
     {
-        std::cerr << "ERROR: Wrong path to settings" << std::endl;
+        throw std::runtime_error("cannot open settings file: " + config_file);
     }
 
     fsSettings["imu_topic"] >> IMU_TOPIC;
+    FEATURE_CAMERA_COUNT = readOptionalInt(fsSettings, "num_of_cam", 1);
+    if (FEATURE_CAMERA_COUNT < 1 || FEATURE_CAMERA_COUNT > MAX_NUM_OF_CAM)
+        throw std::runtime_error("num_of_cam must be 1 or 2");
+    // Phase B0 transports two-camera IDs but deliberately keeps the estimator
+    // and Ceres problem monocular. Later phases will activate camera 1 here.
+    NUM_OF_CAM = 1;
+    STEREO_USE_DEPTH_INIT = readOptionalInt(fsSettings, "stereo_use_depth_init", 0);
+    STEREO_USE_METRIC_INIT = readOptionalInt(fsSettings, "stereo_use_metric_init", 0);
+    STEREO_USE_RIGHT_FACTORS = readOptionalInt(fsSettings, "stereo_use_right_factors", 0);
 
     SOLVER_TIME = fsSettings["max_solver_time"];
     NUM_ITERATIONS = fsSettings["max_num_iterations"];
@@ -77,6 +148,8 @@ void readParameters(ros::NodeHandle &n)
     ROS_INFO("ROW: %f COL: %f ", ROW, COL);
 
     ESTIMATE_EXTRINSIC = fsSettings["estimate_extrinsic"];
+    RIC.clear();
+    TIC.clear();
     if (ESTIMATE_EXTRINSIC == 2)
     {
         ROS_WARN("have no prior about extrinsic param, calibrate extrinsic param");
@@ -95,19 +168,16 @@ void readParameters(ros::NodeHandle &n)
         if (ESTIMATE_EXTRINSIC == 0)
             ROS_WARN(" fix extrinsic param ");
 
-        cv::Mat cv_R, cv_T;
-        fsSettings["extrinsicRotation"] >> cv_R;
-        fsSettings["extrinsicTranslation"] >> cv_T;
-        Eigen::Matrix3d eigen_R;
-        Eigen::Vector3d eigen_T;
-        cv::cv2eigen(cv_R, eigen_R);
-        cv::cv2eigen(cv_T, eigen_T);
-        Eigen::Quaterniond Q(eigen_R);
-        eigen_R = Q.normalized();
-        RIC.push_back(eigen_R);
-        TIC.push_back(eigen_T);
-        ROS_INFO_STREAM("Extrinsic_R : " << std::endl << RIC[0]);
-        ROS_INFO_STREAM("Extrinsic_T : " << std::endl << TIC[0].transpose());
+        for (int camera_id = 0; camera_id < FEATURE_CAMERA_COUNT; camera_id++)
+        {
+            Eigen::Matrix3d eigen_R;
+            Eigen::Vector3d eigen_T;
+            readExtrinsic(fsSettings, camera_id, eigen_R, eigen_T);
+            RIC.push_back(eigen_R);
+            TIC.push_back(eigen_T);
+            ROS_INFO_STREAM("Extrinsic_R camera " << camera_id << ":" << std::endl << RIC[camera_id]);
+            ROS_INFO_STREAM("Extrinsic_T camera " << camera_id << ": " << TIC[camera_id].transpose());
+        }
         
     } 
 
@@ -131,6 +201,20 @@ void readParameters(ros::NodeHandle &n)
     else
     {
         TR = 0;
+    }
+
+    if (FEATURE_CAMERA_COUNT == 2)
+    {
+        if (ESTIMATE_EXTRINSIC != 0)
+            throw std::runtime_error("phase-1 stereo requires estimate_extrinsic=0");
+        if (ESTIMATE_TD != 0)
+            throw std::runtime_error("phase-1 stereo requires estimate_td=0");
+        if (ROLLING_SHUTTER != 0)
+            throw std::runtime_error("phase-1 stereo requires rolling_shutter=0");
+        if (STEREO_USE_DEPTH_INIT || STEREO_USE_METRIC_INIT || STEREO_USE_RIGHT_FACTORS)
+            throw std::runtime_error("stereo estimation switches are not implemented in phase 1 and must be 0");
+        validateStereoExtrinsics();
+        ROS_INFO("phase B0 estimator uses camera 0 only; feature message camera stride is 2");
     }
     
     fsSettings.release();

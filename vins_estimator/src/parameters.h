@@ -10,8 +10,10 @@
 
 const double FOCAL_LENGTH = 460.0;
 const int WINDOW_SIZE = 10;
-const int NUM_OF_CAM = 1;
+const int MAX_NUM_OF_CAM = 2;
 const int NUM_OF_F = 1000;
+extern int NUM_OF_CAM;
+extern int FEATURE_CAMERA_COUNT;
 //#define UNIT_SPHERE_ERROR
 
 extern double INIT_DEPTH;
@@ -37,6 +39,9 @@ extern double TR;
 extern int ESTIMATE_TD;
 extern int ROLLING_SHUTTER;
 extern double ROW, COL;
+extern int STEREO_USE_DEPTH_INIT;
+extern int STEREO_USE_METRIC_INIT;
+extern int STEREO_USE_RIGHT_FACTORS;
 
 
 void readParameters(ros::NodeHandle &n);

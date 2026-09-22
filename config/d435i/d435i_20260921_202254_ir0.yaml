@@ -1,0 +1,18 @@
+%YAML:1.0
+
+# Format adapter for mav0/cam0/sensor.yaml. These are exported factory values,
+# not the result of a new calibration.
+model_type: PINHOLE
+camera_name: d435i_20260921_202254_infra1
+image_width: 848
+image_height: 480
+distortion_parameters:
+   k1: 0.0
+   k2: 0.0
+   p1: 0.0
+   p2: 0.0
+projection_parameters:
+   fx: 424.49407958984375
+   fy: 424.49407958984375
+   cx: 422.3330383300781
+   cy: 241.14089965820312

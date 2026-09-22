@@ -2,6 +2,7 @@
 import argparse
 import csv
 import heapq
+import json
 import time
 from pathlib import Path
 
@@ -11,14 +12,42 @@ from cv_bridge import CvBridge
 from sensor_msgs.msg import Image, Imu
 
 
-def read_camera(root):
+def read_camera(root, camera):
+    path = root / "mav0" / camera / "data.csv"
+    if not path.exists():
+        return []
     rows = []
-    with (root / "mav0/cam0/data.csv").open() as stream:
+    with path.open() as stream:
         for row in csv.reader(stream):
             if not row or row[0].startswith("#"):
                 continue
             rows.append((int(row[0]), row[1]))
     return rows
+
+
+def pair_cameras(left_rows, right_rows):
+    """Return exact timestamp pairs and deterministic unmatched counters."""
+    pairs = []
+    left_only = 0
+    right_only = 0
+    left_index = 0
+    right_index = 0
+    while left_index < len(left_rows) and right_index < len(right_rows):
+        left_stamp, left_name = left_rows[left_index]
+        right_stamp, right_name = right_rows[right_index]
+        if left_stamp == right_stamp:
+            pairs.append((left_stamp, left_name, right_name))
+            left_index += 1
+            right_index += 1
+        elif left_stamp < right_stamp:
+            left_only += 1
+            left_index += 1
+        else:
+            right_only += 1
+            right_index += 1
+    left_only += len(left_rows) - left_index
+    right_only += len(right_rows) - right_index
+    return pairs, left_only, right_only
 
 
 def read_depth(root):
@@ -35,8 +64,11 @@ def read_depth(root):
 
 
 def read_imu(root):
+    path = root / "mav0/imu0/data.csv"
+    if not path.exists():
+        return []
     rows = []
-    with (root / "mav0/imu0/data.csv").open() as stream:
+    with path.open() as stream:
         for row in csv.reader(stream):
             if not row or row[0].startswith("#"):
                 continue
@@ -44,70 +76,140 @@ def read_imu(root):
     return rows
 
 
+def ensure_strictly_increasing(rows, stream_name):
+    for previous, current in zip(rows, rows[1:]):
+        if current[0] <= previous[0]:
+            raise SystemExit(f"{stream_name} 时间戳不是严格递增: {previous[0]} -> {current[0]}")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("dataset", type=Path)
     parser.add_argument("--rate", type=float, default=1.0)
+    parser.add_argument("--stereo", action="store_true", help="publish exact cam0/cam1 pairs")
+    parser.add_argument("--validate-only", action="store_true", help="validate CSV pairing without ROS playback")
     args = parser.parse_args(rospy.myargv()[1:])
 
-    cameras = read_camera(args.dataset)
+    if args.rate <= 0:
+        raise SystemExit("--rate must be greater than zero")
+
+    left_rows = read_camera(args.dataset, "cam0")
+    right_rows = read_camera(args.dataset, "cam1") if args.stereo else []
     depths = read_depth(args.dataset)
     imus = read_imu(args.dataset)
-    if not cameras or not imus:
+    if not left_rows or not imus:
         raise SystemExit("数据集中缺少 cam0 或 imu0 数据")
+    ensure_strictly_increasing(left_rows, "cam0")
+    ensure_strictly_increasing(imus, "imu0")
+    if right_rows:
+        ensure_strictly_increasing(right_rows, "cam1")
+    if depths:
+        ensure_strictly_increasing(depths, "depth0")
+
+    pairs = []
+    left_only = 0
+    right_only = 0
+    if args.stereo:
+        if not right_rows:
+            raise SystemExit("双目模式下数据集中缺少 cam1 数据")
+        pairs, left_only, right_only = pair_cameras(left_rows, right_rows)
+        if not pairs:
+            raise SystemExit("cam0 与 cam1 没有时间戳完全相同的图像对")
+
+    summary = {
+        "mode": "stereo" if args.stereo else "mono",
+        "left_input": len(left_rows),
+        "right_input": len(right_rows),
+        "pairs": len(pairs),
+        "left_only": left_only,
+        "right_only": right_only,
+        "imu_input": len(imus),
+        "depth_input": len(depths),
+    }
+    if args.validate_only:
+        print(json.dumps(summary, sort_keys=True))
+        return
 
     rospy.init_node("euroc_d435i_player")
-    image_pub = rospy.Publisher("/d435i/infra1/image_raw", Image, queue_size=10)
+    left_pub = rospy.Publisher("/d435i/infra1/image_raw", Image, queue_size=10)
+    right_pub = rospy.Publisher("/d435i/infra2/image_raw", Image, queue_size=10) if args.stereo else None
     depth_pub = rospy.Publisher("/d435i/depth/image_raw", Image, queue_size=10)
     imu_pub = rospy.Publisher("/d435i/imu", Imu, queue_size=2000)
     bridge = CvBridge()
     time.sleep(3.0)
 
     events = []
-    for stamp, filename in cameras:
-        events.append((stamp, 1, filename))
+    camera_events = pairs if args.stereo else [(stamp, filename, None) for stamp, filename in left_rows]
+    for stamp, left_filename, right_filename in camera_events:
+        events.append((stamp, 1, (left_filename, right_filename)))
     for stamp, values in imus:
         events.append((stamp, 0, values))
     for stamp, filename in depths:
         events.append((stamp, 2, filename))
     heapq.heapify(events)
 
+    published_left = 0
+    published_right = 0
+    published_imu = 0
+    image_read_failures = 0
     first_stamp = events[0][0]
     wall_start = time.monotonic()
-    while events and not rospy.is_shutdown():
-        stamp, kind, payload = heapq.heappop(events)
-        target = wall_start + (stamp - first_stamp) / 1e9 / args.rate
-        delay = target - time.monotonic()
-        if delay > 0:
-            time.sleep(delay)
-        ros_stamp = rospy.Time(stamp // 1_000_000_000, stamp % 1_000_000_000)
-        if kind == 0:
-            wx, wy, wz, ax, ay, az = payload
-            msg = Imu()
-            msg.header.stamp = ros_stamp
-            msg.header.frame_id = "camera_imu_optical_frame"
-            msg.orientation_covariance[0] = -1.0
-            msg.angular_velocity.x, msg.angular_velocity.y, msg.angular_velocity.z = wx, wy, wz
-            msg.linear_acceleration.x, msg.linear_acceleration.y, msg.linear_acceleration.z = ax, ay, az
-            imu_pub.publish(msg)
-        elif kind == 1:
-            image = cv2.imread(str(args.dataset / "mav0/cam0/data" / payload), cv2.IMREAD_GRAYSCALE)
-            if image is None:
-                raise RuntimeError(f"读取图像失败: {payload}")
-            msg = bridge.cv2_to_imgmsg(image, encoding="mono8")
-            msg.header.stamp = ros_stamp
-            msg.header.frame_id = "camera_infra1_optical_frame"
-            image_pub.publish(msg)
-        else:
-            depth = cv2.imread(str(args.dataset / "mav0/depth0/data" / payload), cv2.IMREAD_UNCHANGED)
-            if depth is None:
-                raise RuntimeError(f"读取深度图失败: {payload}")
-            msg = bridge.cv2_to_imgmsg(depth, encoding="16UC1")
-            msg.header.stamp = ros_stamp
-            msg.header.frame_id = "camera_depth_optical_frame"
-            depth_pub.publish(msg)
+    try:
+        while events and not rospy.is_shutdown():
+            stamp, kind, payload = heapq.heappop(events)
+            target = wall_start + (stamp - first_stamp) / 1e9 / args.rate
+            delay = target - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+            ros_stamp = rospy.Time(stamp // 1_000_000_000, stamp % 1_000_000_000)
+            if kind == 0:
+                wx, wy, wz, ax, ay, az = payload
+                msg = Imu()
+                msg.header.stamp = ros_stamp
+                msg.header.frame_id = "camera_imu_optical_frame"
+                msg.orientation_covariance[0] = -1.0
+                msg.angular_velocity.x, msg.angular_velocity.y, msg.angular_velocity.z = wx, wy, wz
+                msg.linear_acceleration.x, msg.linear_acceleration.y, msg.linear_acceleration.z = ax, ay, az
+                imu_pub.publish(msg)
+                published_imu += 1
+            elif kind == 1:
+                left_filename, right_filename = payload
+                left = cv2.imread(str(args.dataset / "mav0/cam0/data" / left_filename), cv2.IMREAD_GRAYSCALE)
+                right = None
+                if right_filename is not None:
+                    right = cv2.imread(str(args.dataset / "mav0/cam1/data" / right_filename), cv2.IMREAD_GRAYSCALE)
+                if left is None or (right_filename is not None and right is None):
+                    image_read_failures += 1
+                    raise RuntimeError(f"读取双目图像失败: {left_filename}, {right_filename}")
 
-    rospy.loginfo("Dataset playback finished")
+                left_msg = bridge.cv2_to_imgmsg(left, encoding="mono8")
+                left_msg.header.stamp = ros_stamp
+                left_msg.header.frame_id = "camera_infra1_optical_frame"
+                left_pub.publish(left_msg)
+                published_left += 1
+                if right is not None:
+                    right_msg = bridge.cv2_to_imgmsg(right, encoding="mono8")
+                    right_msg.header.stamp = ros_stamp
+                    right_msg.header.frame_id = "camera_infra2_optical_frame"
+                    right_pub.publish(right_msg)
+                    published_right += 1
+            else:
+                depth = cv2.imread(str(args.dataset / "mav0/depth0/data" / payload), cv2.IMREAD_UNCHANGED)
+                if depth is None:
+                    image_read_failures += 1
+                    raise RuntimeError(f"读取深度图失败: {payload}")
+                msg = bridge.cv2_to_imgmsg(depth, encoding="16UC1")
+                msg.header.stamp = ros_stamp
+                msg.header.frame_id = "camera_depth_optical_frame"
+                depth_pub.publish(msg)
+    finally:
+        summary.update({
+            "left_published": published_left,
+            "right_published": published_right,
+            "imu_published": published_imu,
+            "image_read_failures": image_read_failures,
+        })
+        rospy.loginfo("Dataset playback summary: %s", json.dumps(summary, sort_keys=True))
 
 
 if __name__ == "__main__":
