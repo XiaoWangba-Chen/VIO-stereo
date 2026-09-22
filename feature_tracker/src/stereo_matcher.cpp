@@ -185,6 +185,17 @@ std::vector<StereoMatch> StereoMatcher::match(const cv::Mat &left_image,
     std::map<int, StereoPixelHistory> current_pixel_history;
     std::vector<float> accepted_disparities;
 
+    // Keep the last accepted pixel pair while an ID remains active.  This lets a
+    // one-frame KLT failure recover on the next frame without making velocity
+    // non-consecutive (the normalized velocity history below is still dropped).
+    for (const int feature_id : feature_ids)
+    {
+        const std::map<int, StereoPixelHistory>::const_iterator previous =
+            previous_pixel_history_.find(feature_id);
+        if (previous != previous_pixel_history_.end())
+            current_pixel_history[feature_id] = previous->second;
+    }
+
     for (std::size_t index = 0; index < matches.size(); ++index)
     {
         StereoMatch &match = matches[index];
