@@ -14,11 +14,11 @@ class ImageFrame
 {
     public:
         ImageFrame(){};
-        ImageFrame(const map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>>& _points, double _t):t{_t},is_key_frame{false}
+        ImageFrame(const FeatureFrameObservations& _points, double _t):t{_t},is_key_frame{false}
         {
             points = _points;
         };
-        map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>> > > points;
+        FeatureFrameObservations points;
         double t;
         Matrix3d R;
         Vector3d T;

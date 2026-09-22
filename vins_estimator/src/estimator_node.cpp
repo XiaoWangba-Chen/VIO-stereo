@@ -4,6 +4,7 @@
 #include <thread>
 #include <mutex>
 #include <condition_variable>
+#include <cmath>
 #include <ros/ros.h>
 #include <cv_bridge/cv_bridge.h>
 #include <opencv2/opencv.hpp>
@@ -293,7 +294,15 @@ void process()
             ROS_DEBUG("processing vision data with stamp %f \n", img_msg->header.stamp.toSec());
 
             TicToc t_s;
-            map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> image;
+            FeatureFrameObservations image;
+            bool valid_feature_message = img_msg->channels.size() == 5 || img_msg->channels.size() == 6;
+            for (std::size_t channel = 0; valid_feature_message && channel < img_msg->channels.size(); ++channel)
+                valid_feature_message = img_msg->channels[channel].values.size() == img_msg->points.size();
+            if (!valid_feature_message)
+            {
+                ROS_ERROR_THROTTLE(1.0, "discard malformed feature message: expected 5 or 6 aligned channels");
+                continue;
+            }
             for (unsigned int i = 0; i < img_msg->points.size(); i++)
             {
                 int v = img_msg->channels[0].values[i] + 0.5;
@@ -306,10 +315,60 @@ void process()
                 double p_v = img_msg->channels[2].values[i];
                 double velocity_x = img_msg->channels[3].values[i];
                 double velocity_y = img_msg->channels[4].values[i];
-                ROS_ASSERT(z == 1);
-                Eigen::Matrix<double, 7, 1> xyz_uv_velocity;
-                xyz_uv_velocity << x, y, z, p_u, p_v, velocity_x, velocity_y;
-                image[feature_id].emplace_back(camera_id,  xyz_uv_velocity);
+                if (z != 1 || camera_id < 0 || camera_id > 1)
+                {
+                    valid_feature_message = false;
+                    break;
+                }
+                CameraObservation observation;
+                observation.camera_id = camera_id;
+                observation.point << x, y, z;
+                observation.uv << p_u, p_v;
+                observation.velocity << velocity_x, velocity_y;
+                FeatureFrameObservation &feature = image[feature_id];
+                if (camera_id == 0)
+                {
+                    if (feature.has_left)
+                    {
+                        valid_feature_message = false;
+                        break;
+                    }
+                    feature.has_left = true;
+                    feature.left = observation;
+                    if (img_msg->channels.size() == 6)
+                    {
+                        const double depth = img_msg->channels[5].values[i];
+                        if (std::isfinite(depth) && depth > 0.0)
+                        {
+                            feature.has_stereo_depth = true;
+                            feature.stereo_depth = depth;
+                        }
+                    }
+                }
+                else
+                {
+                    if (feature.has_right)
+                    {
+                        valid_feature_message = false;
+                        break;
+                    }
+                    feature.has_right = true;
+                    feature.right = observation;
+                }
+            }
+            for (const auto &feature : image)
+            {
+                if (!feature.second.has_left ||
+                    (feature.second.has_right && !feature.second.has_stereo_depth))
+                {
+                    valid_feature_message = false;
+                    break;
+                }
+            }
+            if (!valid_feature_message)
+            {
+                ROS_ERROR_THROTTLE(1.0, "discard malformed stereo feature records");
+                continue;
             }
             estimator.processImage(image, img_msg->header);
 

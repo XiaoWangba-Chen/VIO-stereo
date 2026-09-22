@@ -54,4 +54,10 @@ add_executable(vins_estimator
 
 target_link_libraries(vins_estimator ${catkin_LIBRARIES} ${OpenCV_LIBS} ${CERES_LIBRARIES}) 
 
+if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(stereo_observation_test tests/stereo_observation_test.cpp)
+  if(TARGET stereo_observation_test)
+    target_link_libraries(stereo_observation_test ${catkin_LIBRARIES})
+  endif()
+endif()
 

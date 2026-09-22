@@ -117,7 +117,7 @@ void Estimator::processIMU(double dt, const Vector3d &linear_acceleration, const
     gyr_0 = angular_velocity;
 }
 
-void Estimator::processImage(const map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> &image, const std_msgs::Header &header)
+void Estimator::processImage(const FeatureFrameObservations &image, const std_msgs::Header &header)
 {
     ROS_DEBUG("new image coming ------------------------------------------");
     ROS_DEBUG("Adding feature points %lu", image.size());
@@ -125,6 +125,13 @@ void Estimator::processImage(const map<int, vector<pair<int, Eigen::Matrix<doubl
         marginalization_flag = MARGIN_OLD;
     else
         marginalization_flag = MARGIN_SECOND_NEW;
+
+    if (STEREO_USE_DEPTH_INIT && solver_flag == NON_LINEAR)
+    {
+        const int initialized = f_manager.initializeNewStereoDepths(frame_count);
+        if (initialized > 0)
+            ROS_DEBUG("initialized %d new landmarks from stereo depth", initialized);
+    }
 
     ROS_DEBUG("this frame is--------------------%s", marginalization_flag ? "reject" : "accept");
     ROS_DEBUG("%s", marginalization_flag ? "Non-keyframe" : "Keyframe");
@@ -315,7 +322,8 @@ bool Estimator::initialStructure()
         for (auto &id_pts : frame_it->second.points)
         {
             int feature_id = id_pts.first;
-            for (auto &i_p : id_pts.second)
+            const FeatureFrameObservation &observation = id_pts.second;
+            if (observation.has_left)
             {
                 it = sfm_tracked_points.find(feature_id);
                 if(it != sfm_tracked_points.end())
@@ -323,7 +331,7 @@ bool Estimator::initialStructure()
                     Vector3d world_pts = it->second;
                     cv::Point3f pts_3(world_pts(0), world_pts(1), world_pts(2));
                     pts_3_vector.push_back(pts_3);
-                    Vector2d img_pts = i_p.second.head<2>();
+                    Vector2d img_pts = observation.left.point.head<2>();
                     cv::Point2f pts_2(img_pts(0), img_pts(1));
                     pts_2_vector.push_back(pts_2);
                 }
@@ -419,6 +427,12 @@ bool Estimator::visualInitialAlign()
         if (!(it_per_id.used_num >= 2 && it_per_id.start_frame < WINDOW_SIZE - 2))
             continue;
         it_per_id.estimated_depth *= s;
+    }
+
+    if (STEREO_USE_DEPTH_INIT)
+    {
+        const int initialized = f_manager.initializeStereoDepths();
+        ROS_INFO("initialized %d landmarks from anchor-frame stereo depth", initialized);
     }
 
     Matrix3d R0 = Utility::g2R(g);

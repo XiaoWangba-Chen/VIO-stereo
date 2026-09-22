@@ -11,6 +11,7 @@
 #include <deque>
 #include <condition_variable>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -67,6 +68,7 @@ struct StereoMatchJob
     std::vector<cv::Point2f> left_normalized;
     std::vector<int> feature_ids;
     std_msgs::Header header;
+    sensor_msgs::PointCloudPtr estimator_features;
 };
 
 std::deque<StereoMatchJob> stereo_job_queue;
@@ -190,6 +192,52 @@ sensor_msgs::PointCloudPtr makeStereoDiagnosticMessage(
     return message;
 }
 
+sensor_msgs::PointCloudPtr makeStereoEstimatorMessage(
+    const sensor_msgs::PointCloud &left_features, const std::vector<StereoMatch> &matches)
+{
+    sensor_msgs::PointCloudPtr message(new sensor_msgs::PointCloud);
+    message->header = left_features.header;
+    const char *channel_names[] = {
+        "id", "u", "v", "velocity_x", "velocity_y", "stereo_depth"};
+    message->channels.resize(6);
+    for (std::size_t channel = 0; channel < message->channels.size(); ++channel)
+        message->channels[channel].name = channel_names[channel];
+
+    std::map<int, const StereoMatch *> matches_by_id;
+    for (const StereoMatch &match : matches)
+        matches_by_id[match.feature_id] = &match;
+
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    for (std::size_t index = 0; index < left_features.points.size(); ++index)
+    {
+        const int encoded_id = static_cast<int>(left_features.channels[0].values[index] + 0.5f);
+        const int feature_id = encoded_id / NUM_OF_CAM;
+        const auto found = matches_by_id.find(feature_id);
+        const StereoMatch *match = found == matches_by_id.end() ? nullptr : found->second;
+        const bool accepted = match && match->reject_code == STEREO_ACCEPTED;
+
+        message->points.push_back(left_features.points[index]);
+        for (std::size_t channel = 0; channel < 5; ++channel)
+            message->channels[channel].values.push_back(left_features.channels[channel].values[index]);
+        message->channels[5].values.push_back(accepted ? match->depth : nan);
+
+        if (!accepted)
+            continue;
+        geometry_msgs::Point32 right_point;
+        right_point.x = match->right_normalized.x;
+        right_point.y = match->right_normalized.y;
+        right_point.z = 1.0f;
+        message->points.push_back(right_point);
+        message->channels[0].values.push_back(static_cast<float>(feature_id * NUM_OF_CAM + 1));
+        message->channels[1].values.push_back(match->right_pixel.x);
+        message->channels[2].values.push_back(match->right_pixel.y);
+        message->channels[3].values.push_back(match->right_velocity.x);
+        message->channels[4].values.push_back(match->right_velocity.y);
+        message->channels[5].values.push_back(nan);
+    }
+    return message;
+}
+
 void stereoWorkerLoop()
 {
     for (;;)
@@ -215,6 +263,8 @@ void stereoWorkerLoop()
             job.left_image, job.right_image, job.left_pixels, job.left_normalized,
             job.feature_ids, job.header.stamp.toSec());
         pub_stereo_feature.publish(makeStereoDiagnosticMessage(job.header, matches));
+        if (job.estimator_features)
+            pub_img.publish(makeStereoEstimatorMessage(*job.estimator_features, matches));
         stereo_jobs_processed++;
         ROS_INFO("stereo matcher processing costs: %f", timer.toc());
         if (stereo_jobs_processed % 300 == 0)
@@ -329,6 +379,7 @@ void processImage(const sensor_msgs::ImageConstPtr &img_msg,
     {
     }
 
+    sensor_msgs::PointCloudPtr pending_stereo_features;
     if (PUB_THIS_FRAME)
     {
         pub_count++;
@@ -370,6 +421,8 @@ void processImage(const sensor_msgs::ImageConstPtr &img_msg,
         ROS_DEBUG("publish %f, at %f", feature_points->header.stamp.toSec(), ros::Time::now().toSec());
         if (!init_pub)
             init_pub = true;
+        else if (NUM_OF_CAM == 2 && STEREO_USE_DEPTH_INIT)
+            pending_stereo_features = feature_points;
         else
             pub_img.publish(feature_points);
 
@@ -395,6 +448,7 @@ void processImage(const sensor_msgs::ImageConstPtr &img_msg,
         job.left_normalized = trackerData[0].cur_un_pts;
         job.feature_ids = trackerData[0].ids;
         job.header = img_msg->header;
+        job.estimator_features = pending_stereo_features;
         {
             std::lock_guard<std::mutex> lock(stereo_job_mutex);
             stereo_job_queue.push_back(std::move(job));

@@ -229,14 +229,18 @@ void readParameters(ros::NodeHandle &n)
         throw std::runtime_error("invalid stereo matching thresholds or depth range");
     if (STEREO_TRACK && NUM_OF_CAM != 2)
         throw std::runtime_error("stereo_track=1 requires num_of_cam=2");
+    if (STEREO_USE_DEPTH_INIT && NUM_OF_CAM != 2)
+        throw std::runtime_error("stereo_use_depth_init=1 requires num_of_cam=2");
 
     if (NUM_OF_CAM == 2)
     {
         IMAGE1_TOPIC = readRequiredString(fsSettings, "image1_topic");
         const std::string cam1_calib = resolveConfigPath(config_file, readRequiredString(fsSettings, "cam1_calib"));
         CAM_NAMES.push_back(cam1_calib);
-        if (STEREO_USE_DEPTH_INIT || STEREO_USE_METRIC_INIT || STEREO_USE_RIGHT_FACTORS)
-            throw std::runtime_error("stereo estimation switches are not implemented in phase 1 and must be 0");
+        if (STEREO_USE_DEPTH_INIT && !STEREO_TRACK)
+            throw std::runtime_error("stereo_use_depth_init=1 requires stereo_track=1");
+        if (STEREO_USE_METRIC_INIT || STEREO_USE_RIGHT_FACTORS)
+            throw std::runtime_error("metric stereo initialization and right factors are not implemented in phase B2");
         validateStereoIntrinsics(CAM_NAMES[0], CAM_NAMES[1]);
         if (STEREO_TRACK)
             STEREO_BASELINE_X = readAndValidateStereoBaseline(fsSettings);

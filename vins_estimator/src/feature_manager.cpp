@@ -42,7 +42,7 @@ int FeatureManager::getFeatureCount()
 }
 
 
-bool FeatureManager::addFeatureCheckParallax(int frame_count, const map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> &image, double td)
+bool FeatureManager::addFeatureCheckParallax(int frame_count, const FeatureFrameObservations &image, double td)
 {
     ROS_DEBUG("input feature: %d", (int)image.size());
     ROS_DEBUG("num of feature: %d", getFeatureCount());
@@ -51,7 +51,7 @@ bool FeatureManager::addFeatureCheckParallax(int frame_count, const map<int, vec
     last_track_num = 0;
     for (auto &id_pts : image)
     {
-        FeaturePerFrame f_per_fra(id_pts.second[0].second, td);
+        FeaturePerFrame f_per_fra(id_pts.second, td);
 
         int feature_id = id_pts.first;
         auto it = find_if(feature.begin(), feature.end(), [feature_id](const FeaturePerId &it)
@@ -94,6 +94,25 @@ bool FeatureManager::addFeatureCheckParallax(int frame_count, const map<int, vec
         ROS_DEBUG("current parallax: %lf", parallax_sum / parallax_num * FOCAL_LENGTH);
         return parallax_sum / parallax_num >= MIN_PARALLAX;
     }
+}
+
+int FeatureManager::initializeStereoDepths()
+{
+    int initialized = 0;
+    for (auto &feature_per_id : feature)
+        initialized += feature_per_id.initializeStereoDepth() ? 1 : 0;
+    return initialized;
+}
+
+int FeatureManager::initializeNewStereoDepths(int frame_count)
+{
+    int initialized = 0;
+    for (auto &feature_per_id : feature)
+    {
+        if (feature_per_id.start_frame == frame_count)
+            initialized += feature_per_id.initializeStereoDepth() ? 1 : 0;
+    }
+    return initialized;
 }
 
 void FeatureManager::debugShow()
