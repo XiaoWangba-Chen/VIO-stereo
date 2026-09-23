@@ -47,11 +47,14 @@ fisheye: 0
 max_solver_time: 0.04
 max_num_iterations: 8
 keyframe_parallax: 10.0
+# VINS preintegration weights stay conservatively tuned; the recorder's Allan
+# values are not direct drop-in replacements for this model.  Gravity remains
+# physical: measured 10.1087 m/s^2 includes accelerometer bias/scale.
 acc_n: 0.1
 gyr_n: 0.01
 acc_w: 0.0002
 gyr_w: 2.0e-5
-g_norm: 10.1087
+g_norm: 9.81007
 
 loop_closure: 0
 fast_relocalization: 0
