@@ -5,6 +5,9 @@
 #include <mutex>
 #include <condition_variable>
 #include <cmath>
+#include <chrono>
+#include <cstdlib>
+#include <fstream>
 #include <ros/ros.h>
 #include <cv_bridge/cv_bridge.h>
 #include <opencv2/opencv.hpp>
@@ -39,6 +42,13 @@ Eigen::Vector3d gyr_0;
 bool init_feature = 0;
 bool init_imu = 1;
 double last_imu_t = 0;
+std::ofstream benchmark_trace;
+
+int64_t monotonicNanoseconds()
+{
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 
 void predict(const sensor_msgs::ImuConstPtr &imu_msg)
 {
@@ -294,6 +304,7 @@ void process()
             ROS_DEBUG("processing vision data with stamp %f \n", img_msg->header.stamp.toSec());
 
             TicToc t_s;
+            const int64_t backend_start_ns = monotonicNanoseconds();
             FeatureFrameObservations image;
             bool valid_feature_message = img_msg->channels.size() == 5 || img_msg->channels.size() == 6;
             for (std::size_t channel = 0; valid_feature_message && channel < img_msg->channels.size(); ++channel)
@@ -373,6 +384,29 @@ void process()
             estimator.processImage(image, img_msg->header);
 
             double whole_t = t_s.toc();
+            const int64_t backend_finish_ns = monotonicNanoseconds();
+            double predicted_time_snapshot;
+            {
+                std::lock_guard<std::mutex> state_lock(m_state);
+                predicted_time_snapshot = latest_time;
+            }
+            if (benchmark_trace.is_open())
+            {
+                const Estimator::BenchmarkTiming &timing = estimator.benchmark_timing;
+                benchmark_trace << img_msg->header.stamp.toNSec() << ','
+                                << backend_start_ns << ',' << backend_finish_ns << ','
+                                << whole_t << ',';
+                if (timing.optimization_ran)
+                    benchmark_trace << timing.optimization_ms;
+                benchmark_trace << ',';
+                if (timing.marginalization_ran)
+                    benchmark_trace << timing.marginalization_ms;
+                benchmark_trace << ',' << (timing.keyframe ? 1 : 0) << ','
+                                << timing.window_states << ',' << measurement.first.size() << ','
+                                << std::max(0.0, predicted_time_snapshot - img_msg->header.stamp.toSec())
+                                << '\n';
+                benchmark_trace.flush();
+            }
             printStatistics(estimator, whole_t);
             std_msgs::Header header = img_msg->header;
             header.frame_id = "world";
@@ -402,6 +436,14 @@ int main(int argc, char **argv)
     ros::init(argc, argv, "vins_estimator");
     ros::NodeHandle n("~");
     ros::console::set_logger_level(ROSCONSOLE_DEFAULT_NAME, ros::console::levels::Info);
+    const char *benchmark_dir = std::getenv("VINS_BENCHMARK_DIR");
+    if (benchmark_dir && *benchmark_dir)
+    {
+        benchmark_trace.open(std::string(benchmark_dir) + "/backend_timing.csv");
+        benchmark_trace << "timestamp_ns,backend_start_monotonic_ns,backend_finish_monotonic_ns,"
+                           "backend_total_ms,optimization_ms,marginalization_ms,keyframe,"
+                           "window_states,imu_samples,imu_span_s\n";
+    }
     try
     {
         readParameters(n);

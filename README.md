@@ -1,161 +1,267 @@
-# VINS-Mono
-## A Robust and Versatile Monocular Visual-Inertial State Estimator
+# Stereo VINS-Mono
 
-**11 Jan 2019**: An extension of **VINS**, which supports stereo cameras / stereo cameras + IMU / mono camera + IMU, is published at [VINS-Fusion](https://github.com/HKUST-Aerial-Robotics/VINS-Fusion)
+基于 [HKUST VINS-Mono](https://github.com/HKUST-Aerial-Robotics/VINS-Mono) 改造的紧耦合双目视觉惯性里程计。本项目保留原有单目 VIO、滑动窗口优化和回环模块，在前端、初始化和后端中加入双目观测，使系统能够直接利用双目基线恢复尺度，并在优化过程中持续使用右目约束。
 
-**29 Dec 2017**: New features: Add map merge, pose graph reuse, online temporal calibration function, and support rolling shutter camera. Map reuse videos: 
+> 本仓库是面向算法研究和实验复现的 ROS 1 工程，并非 VINS-Fusion 的替代品。当前双目流程主要使用 EuRoC 数据集验证。
 
-<a href="https://www.youtube.com/embed/WDpH80nfZes" target="_blank"><img src="http://img.youtube.com/vi/WDpH80nfZes/0.jpg" 
-alt="cla" width="240" height="180" border="10" /></a>
-<a href="https://www.youtube.com/embed/eINyJHB34uU" target="_blank"><img src="http://img.youtube.com/vi/eINyJHB34uU/0.jpg" 
-alt="icra" width="240" height="180" border="10" /></a>
+## 主要特点
 
-VINS-Mono is a real-time SLAM framework for **Monocular Visual-Inertial Systems**. It uses an optimization-based sliding window formulation for providing high-accuracy visual-inertial odometry. It features efficient IMU pre-integration with bias correction, automatic estimator initialization, online extrinsic calibration, failure detection and recovery, loop detection, and global pose graph optimization, map merge, pose graph reuse, online temporal calibration, rolling shutter support. VINS-Mono is primarily designed for state estimation and feedback control of autonomous drones, but it is also capable of providing accurate localization for AR applications. This code runs on **Linux**, and is fully integrated with **ROS**. For **iOS** mobile implementation, please go to [VINS-Mobile](https://github.com/HKUST-Aerial-Robotics/VINS-Mobile).
+- **兼容单目模式**：通过同一套节点和配置切换单目/双目，原有单目流程仍可使用。
+- **严格双目同步**：左右图像按时间戳配对，不将错位帧送入双目匹配。
+- **异步双目匹配**：左目时序跟踪与右目匹配解耦，双目任务由独立工作线程处理。
+- **多级匹配筛选**：包含前后向光流、边界、极线误差、视差和深度范围检查。
+- **双目深度初始化**：由有效视差生成度量深度，为特征逆深度提供初值。
+- **固定尺度初始化**：利用双目路标与 PnP 恢复窗口内度量位姿，再结合 IMU 求解速度、重力和陀螺仪偏置，不再依赖单目尺度估计。
+- **紧耦合右目约束**：滑动窗口中加入同帧双目和跨帧双目重投影残差，右目观测同时参与非线性优化与边缘化。
+- **可复现实验工具**：提供 EuRoC 单目/双目交错运行、完整性检查、资源统计、ATE/RPE 计算和报告生成。
+- **IMU 噪声模型可选**：兼容原有离散标准差配置，也支持连续时间噪声密度。
 
-**Authors:** [Tong Qin](http://www.qintonguav.com), [Peiliang Li](https://github.com/PeiliangLi), [Zhenfei Yang](https://github.com/dvorak0), and [Shaojie Shen](http://www.ece.ust.hk/ece.php/profile/facultydetail/eeshaojie) from the [HKUST Aerial Robotics Group](http://uav.ust.hk/)
+## 系统流程
 
-**Videos:**
+```text
+left image ──> temporal tracking ───────────────┐
+                                                ├─> feature observations ─> sliding-window VIO
+right image ─> exact-time pairing ─> stereo ───┘            │
+                                      matching               ├─ left reprojection factors
+                                          │                  ├─ right reprojection factors
+                                          └─ metric depth ───└─ stereo metric initialization
 
-<a href="https://www.youtube.com/embed/mv_9snb_bKs" target="_blank"><img src="http://img.youtube.com/vi/mv_9snb_bKs/0.jpg" 
-alt="euroc" width="240" height="180" border="10" /></a>
-<a href="https://www.youtube.com/embed/g_wN0Nt0VAU" target="_blank"><img src="http://img.youtube.com/vi/g_wN0Nt0VAU/0.jpg" 
-alt="indoor_outdoor" width="240" height="180" border="10" /></a>
-<a href="https://www.youtube.com/embed/I4txdvGhT6I" target="_blank"><img src="http://img.youtube.com/vi/I4txdvGhT6I/0.jpg" 
-alt="AR_demo" width="240" height="180" border="10" /></a>
-
-EuRoC dataset;                  Indoor and outdoor performance;                         AR application;
-
-<a href="https://www.youtube.com/embed/2zE84HqT0es" target="_blank"><img src="http://img.youtube.com/vi/2zE84HqT0es/0.jpg" 
-alt="MAV platform" width="240" height="180" border="10" /></a>
-<a href="https://www.youtube.com/embed/CI01qbPWlYY" target="_blank"><img src="http://img.youtube.com/vi/CI01qbPWlYY/0.jpg" 
-alt="Mobile platform" width="240" height="180" border="10" /></a>
-
- MAV application;               Mobile implementation (Video link for mainland China friends: [Video1](http://www.bilibili.com/video/av10813254/) [Video2](http://www.bilibili.com/video/av10813205/) [Video3](http://www.bilibili.com/video/av10813089/) [Video4](http://www.bilibili.com/video/av10813325/) [Video5](http://www.bilibili.com/video/av10813030/))
-
-**Related Papers**
-
-* **Online Temporal Calibration for Monocular Visual-Inertial Systems**, Tong Qin, Shaojie Shen, IEEE/RSJ International Conference on Intelligent Robots and Systems (IROS, 2018), **best student paper award** [pdf](https://ieeexplore.ieee.org/abstract/document/8593603)
-
-* **VINS-Mono: A Robust and Versatile Monocular Visual-Inertial State Estimator**, Tong Qin, Peiliang Li, Zhenfei Yang, Shaojie Shen, IEEE Transactions on Robotics[pdf](https://ieeexplore.ieee.org/document/8421746/?arnumber=8421746&source=authoralert) 
-
-*If you use VINS-Mono for your academic research, please cite at least one of our related papers.*[bib](https://github.com/HKUST-Aerial-Robotics/VINS-Mono/blob/master/support_files/paper_bib.txt)
-
-## 1. Prerequisites
-1.1 **Ubuntu** and **ROS**
-Ubuntu  16.04.
-ROS Kinetic. [ROS Installation](http://wiki.ros.org/ROS/Installation)
-additional ROS pacakge
-```
-    sudo apt-get install ros-YOUR_DISTRO-cv-bridge ros-YOUR_DISTRO-tf ros-YOUR_DISTRO-message-filters ros-YOUR_DISTRO-image-transport
+IMU ───────────────> pre-integration ────────────────────────> motion constraints
 ```
 
+双目前端以左目特征 ID 为主线。右目匹配成功后，同一条观测会携带右目归一化坐标和可选的双目深度；匹配失败不会删除左目特征，因此系统可以在局部双目退化时继续依靠左目与 IMU 工作。
 
-1.2. **Ceres Solver**
-Follow [Ceres Installation](http://ceres-solver.org/installation.html), use **version 1.14.0** and remember to **sudo make install**. (There are compilation issues in Ceres versions 2.0.0 and above.)
+## 与原版 VINS-Mono 的主要差异
 
-## 2. Build VINS-Mono on ROS
-Clone the repository and catkin_make:
+| 模块 | 原版 VINS-Mono | 本仓库 |
+| --- | --- | --- |
+| 图像输入 | 单目 | 单目或严格同步双目 |
+| 前端 | 单目时序光流 | 左目时序光流 + 右目双目匹配 |
+| 特征深度 | 由多帧三角化逐步恢复 | 可由双目视差直接初始化 |
+| 初始化尺度 | 单目视觉惯性对齐求尺度 | 可使用双目度量初始化，无尺度状态 |
+| 后端视觉残差 | 左目跨帧重投影 | 左目残差 + 同帧/跨帧右目残差 |
+| 边缘化 | 单目视觉和 IMU 因子 | 同时处理右目视觉因子 |
+| 评测 | 基础轨迹输出 | 自动化单目/双目 ATE、RPE、耗时和资源评测 |
+
+## 依赖
+
+- Linux
+- ROS 1 与 catkin
+- OpenCV
+- Eigen3
+- Ceres Solver
+
+工程沿用原版 VINS-Mono 的 ROS 1 构建结构。原上游环境为 Ubuntu 16.04、ROS Kinetic 和 Ceres 1.14；在其他 ROS 1 发行版上可能需要调整依赖版本。
+
+安装常见 ROS 依赖：
+
+```bash
+sudo apt install ros-${ROS_DISTRO}-cv-bridge \
+                 ros-${ROS_DISTRO}-tf \
+                 ros-${ROS_DISTRO}-message-filters \
+                 ros-${ROS_DISTRO}-image-transport
 ```
-    cd ~/catkin_ws/src
-    git clone https://github.com/HKUST-Aerial-Robotics/VINS-Mono.git
-    cd ../
-    catkin_make
-    source ~/catkin_ws/devel/setup.bash
+
+## 构建
+
+将仓库放入 catkin 工作空间：
+
+```bash
+mkdir -p ~/catkin_ws/src
+cd ~/catkin_ws/src
+git clone https://github.com/XiaoWangba-Chen/VIO-stereo.git VINS-Mono
+cd ..
+catkin_make
+source devel/setup.bash
 ```
 
-## 3. Visual-Inertial Odometry and Pose Graph Reuse on Public datasets
-Download [EuRoC MAV Dataset](http://projects.asl.ethz.ch/datasets/doku.php?id=kmavvisualinertialdatasets). Although it contains stereo cameras, we only use one camera. The system also works with [ETH-asl cla dataset](http://robotics.ethz.ch/~asl-datasets/maplab/multi_session_mapping_CLA/bags/). We take EuRoC as the example.
+## EuRoC 数据
 
-**3.1 visual-inertial odometry and loop closure**
+从 [EuRoC MAV Dataset](https://projects.asl.ethz.ch/datasets/doku.php?id=kmavvisualinertialdatasets) 下载数据。自动评测工具使用解压后的 EuRoC 目录，至少需要：
 
-3.1.1 Open three terminals, launch the vins_estimator , rviz and play the bag file respectively. Take MH_01 for example
+```text
+<sequence>/mav0/
+├── cam0/
+│   ├── data.csv
+│   └── data/
+├── cam1/
+│   ├── data.csv
+│   └── data/
+├── imu0/data.csv
+└── state_groundtruth_estimate0/data.csv
 ```
-    roslaunch vins_estimator euroc.launch 
-    roslaunch vins_estimator vins_rviz.launch
-    rosbag play YOUR_PATH_TO_DATASET/MH_01_easy.bag 
+
+仓库提供两套对照配置：
+
+- `config/euroc/euroc_mono_eval.yaml`
+- `config/euroc/euroc_stereo_eval.yaml`
+
+双目配置使用已经校正的 EuRoC 相机模型：
+
+- `config/euroc/euroc_rectified_cam0.yaml`
+- `config/euroc/euroc_rectified_cam1.yaml`
+
+## 手动运行
+
+先启动 ROS：
+
+```bash
+roscore
 ```
-(If you fail to open vins_rviz.launch, just open an empty rviz, then load the config file: file -> Open Config-> YOUR_VINS_FOLDER/config/vins_rviz_config.rviz)
 
-3.1.2 (Optional) Visualize ground truth. We write a naive benchmark publisher to help you visualize the ground truth. It uses a naive strategy to align VINS with ground truth. Just for visualization. not for quantitative comparison on academic publications.
+单目模式：
+
+```bash
+roslaunch vins_estimator euroc.launch \
+  config_path:=$(rospack find feature_tracker)/../config/euroc/euroc_mono_eval.yaml
 ```
-    roslaunch benchmark_publisher publish.launch  sequence_name:=MH_05_difficult
+
+双目模式：
+
+```bash
+roslaunch vins_estimator euroc.launch \
+  config_path:=$(rospack find feature_tracker)/../config/euroc/euroc_stereo_eval.yaml
 ```
- (Green line is VINS result, red line is ground truth). 
- 
-3.1.3 (Optional) You can even run EuRoC **without extrinsic parameters** between camera and IMU. We will calibrate them online. Replace the first command with:
+
+输入话题默认为：
+
+| 数据 | 话题 |
+| --- | --- |
+| 左目图像 | `/cam0/image_raw` |
+| 右目图像 | `/cam1/image_raw` |
+| IMU | `/imu0` |
+
+可以直接播放带有这些话题的 EuRoC ROS bag，也可以使用仓库中的数据播放器：
+
+```bash
+python3 tools/play_euroc_ros1.py /path/to/MH_03_medium --stereo --rectify-euroc
 ```
-    roslaunch vins_estimator euroc_no_extrinsic_param.launch
+
+启动 RViz：
+
+```bash
+roslaunch vins_estimator vins_rviz.launch
 ```
-**No extrinsic parameters** in that config file.  Waiting a few seconds for initial calibration. Sometimes you cannot feel any difference as the calibration is done quickly.
 
-**3.2 map merge**
+## 双目配置
 
-After playing MH_01 bag, you can continue playing MH_02 bag, MH_03 bag ... The system will merge them according to the loop closure.
+核心参数位于 YAML 配置中：
 
-**3.3 map reuse**
+| 参数 | 含义 |
+| --- | --- |
+| `num_of_cam` | `1` 为单目，`2` 为双目 |
+| `image_topic` / `image1_topic` | 左、右目图像话题 |
+| `cam0_calib` / `cam1_calib` | 左、右目标定文件 |
+| `extrinsicRotation1` / `extrinsicTranslation1` | 右相机到 IMU 的外参 |
+| `stereo_track` | 启用双目匹配 |
+| `stereo_fb_threshold` | 前后向光流一致性阈值，单位为像素 |
+| `stereo_epipolar_threshold` | 前端极线误差阈值，单位为像素 |
+| `stereo_backend_reprojection_threshold` | 后端接收右目观测的重投影阈值 |
+| `stereo_min_depth` / `stereo_max_depth` | 可接受的双目深度范围，单位为米 |
+| `stereo_use_depth_init` | 使用双目深度初始化特征逆深度 |
+| `stereo_use_metric_init` | 使用固定尺度双目初始化 |
+| `stereo_use_right_factors` | 在优化与边缘化中加入右目因子 |
+| `imu_noise_mode` | `discrete_std` 或 `continuous_density` |
 
-3.3.1 map save
+推荐完整双目模式：
 
-Set the **pose_graph_save_path** in the config file (YOUR_VINS_FOLEDER/config/euroc/euroc_config.yaml). After playing MH_01 bag, input **s** in vins_estimator terminal, then **enter**. The current pose graph will be saved. 
-
-3.3.2 map load
-
-Set the **load_previous_pose_graph** to 1 before doing 3.1.1. The system will load previous pose graph from **pose_graph_save_path**. Then you can play MH_02 bag. New sequence will be aligned to the previous pose graph.
-
-## 4. AR Demo
-4.1 Download the [bag file](https://www.dropbox.com/s/s29oygyhwmllw9k/ar_box.bag?dl=0), which is collected from HKUST Robotic Institute. For friends in mainland China, download from [bag file](https://pan.baidu.com/s/1geEyHNl).
-
-4.2 Open three terminals, launch the ar_demo, rviz and play the bag file respectively.
+```yaml
+num_of_cam: 2
+stereo_track: 1
+stereo_use_depth_init: 1
+stereo_use_metric_init: 1
+stereo_use_right_factors: 1
 ```
-    roslaunch ar_demo 3dm_bag.launch
-    roslaunch ar_demo ar_rviz.launch
-    rosbag play YOUR_PATH_TO_DATASET/ar_box.bag 
+
+这些选项具有依赖关系。例如，度量初始化依赖双目深度初始化，而深度初始化和右目因子都要求启用双目跟踪。程序启动时会检查不合法的组合并直接报错。
+
+## 自动化基准测试
+
+确认 ROS 1 环境、工作空间和数据完整：
+
+```bash
+python3 tools/run_euroc_benchmark.py \
+  --dataset /path/to/MH_03_medium \
+  --validate-only
 ```
-We put one 0.8m x 0.8m x 0.8m virtual box in front of your view. 
 
-## 5. Run with your device 
+执行单目/双目对照实验：
 
-Suppose you are familiar with ROS and you can get a camera and an IMU with raw metric measurements in ROS topic, you can follow these steps to set up your device. For beginners, we highly recommend you to first try out [VINS-Mobile](https://github.com/HKUST-Aerial-Robotics/VINS-Mobile) if you have iOS devices since you don't need to set up anything.
-
-5.1 Change to your topic name in the config file. The image should exceed 20Hz and IMU should exceed 100Hz. Both image and IMU should have the accurate time stamp. IMU should contain absolute acceleration values including gravity.
-
-5.2 Camera calibration:
-
-We support the [pinhole model](http://docs.opencv.org/2.4.8/modules/calib3d/doc/camera_calibration_and_3d_reconstruction.html) and the [MEI model](http://www.robots.ox.ac.uk/~cmei/articles/single_viewpoint_calib_mei_07.pdf). You can calibrate your camera with any tools you like. Just write the parameters in the config file in the right format. If you use rolling shutter camera, please carefully calibrate your camera, making sure the reprojection error is less than 0.5 pixel.
-
-5.3 **Camera-Imu extrinsic parameters**:
-
-If you have seen the config files for EuRoC and AR demos, you can find that we can estimate and refine them online. If you familiar with transformation, you can figure out the rotation and position by your eyes or via hand measurements. Then write these values into config as the initial guess. Our estimator will refine extrinsic parameters online. If you don't know anything about the camera-IMU transformation, just ignore the extrinsic parameters and set the **estimate_extrinsic** to **2**, and rotate your device set at the beginning for a few seconds. When the system works successfully, we will save the calibration result. you can use these result as initial values for next time. An example of how to set the extrinsic parameters is in[extrinsic_parameter_example](https://github.com/HKUST-Aerial-Robotics/VINS-Mono/blob/master/config/extrinsic_parameter_example.pdf)
-
-5.4 **Temporal calibration**:
-Most self-made visual-inertial sensor sets are unsynchronized. You can set **estimate_td** to 1 to online estimate the time offset between your camera and IMU.  
-
-5.5 **Rolling shutter**:
-For rolling shutter camera (carefully calibrated, reprojection error under 0.5 pixel), set **rolling_shutter** to 1. Also, you should set rolling shutter readout time **rolling_shutter_tr**, which is from sensor datasheet(usually 0-0.05s, not exposure time). Don't try web camera, the web camera is so awful.
-
-5.6 Other parameter settings: Details are included in the config file.
-
-5.7 Performance on different devices: 
-
-(global shutter camera + synchronized high-end IMU, e.g. VI-Sensor) > (global shutter camera + synchronized low-end IMU) > (global camera + unsync high frequency IMU) > (global camera + unsync low frequency IMU) > (rolling camera + unsync low frequency IMU). 
-
-## 6. Docker Support
-
-To further facilitate the building process, we add docker in our code. Docker environment is like a sandbox, thus makes our code environment-independent. To run with docker, first make sure [ros](http://wiki.ros.org/ROS/Installation) and [docker](https://docs.docker.com/install/linux/docker-ce/ubuntu/) are installed on your machine. Then add your account to `docker` group by `sudo usermod -aG docker $YOUR_USER_NAME`. **Relaunch the terminal or logout and re-login if you get `Permission denied` error**, type:
+```bash
+python3 tools/run_euroc_benchmark.py \
+  --dataset /path/to/MH_03_medium \
+  --runs 3
 ```
-cd ~/catkin_ws/src/VINS-Mono/docker
-make build
-./run.sh LAUNCH_FILE_NAME   # ./run.sh euroc.launch
+
+默认按 `mono, stereo, stereo, mono, mono, stereo` 的顺序交错运行，降低运行顺序对资源和精度比较的影响。结果默认写入 `outputs/euroc_eval/MH_03_medium`，包括：
+
+- 每次运行使用的配置、轨迹和日志
+- 前端、双目匹配、后端优化和边缘化耗时
+- CPU 与内存时间序列
+- SE(3) 对齐 ATE
+- 一秒间隔 RPE
+- Sim(3) ATE 与尺度诊断
+- 成功率、轨迹覆盖率和双目配对完整性
+
+仅重新生成报告：
+
+```bash
+python3 tools/evaluate_euroc_benchmark.py
 ```
-Note that the docker building process may take a while depends on your network and machine. After VINS-Mono successfully started, open another terminal and play your bag file, then you should be able to see the result. If you need modify the code, simply run `./run.sh LAUNCH_FILE_NAME` after your changes.
 
+更完整的实验说明见 [EuRoC 单目/双目评测文档](docs/euroc_mono_stereo_benchmark.md)。
 
-## 7. Acknowledgements
-We use [ceres solver](http://ceres-solver.org/) for non-linear optimization and [DBoW2](https://github.com/dorian3d/DBoW2) for loop detection, and a generic [camera model](https://github.com/hengli/camodocal).
+## 测试
 
-## 8. Licence
-The source code is released under [GPLv3](http://www.gnu.org/licenses/) license.
+C++ 单元测试已接入 catkin：
 
-We are still working on improving the code reliability. For any technical issues, please contact Tong QIN <tong.qinATconnect.ust.hk> or Peiliang LI <pliapATconnect.ust.hk>.
+```bash
+cd ~/catkin_ws
+catkin_make run_tests
+catkin_test_results
+```
 
-For commercial inquiries, please contact Shaojie SHEN <eeshaojieATust.hk>
+覆盖内容包括：
+
+- 双目光流、极线、视差和深度筛选
+- 双目观测在特征生命周期中的传播
+- 同帧和跨帧双目重投影因子的解析 Jacobian
+- 双目度量路标构建与 PnP
+
+评测指标的纯 Python 测试：
+
+```bash
+python3 -m unittest tools/test_euroc_benchmark_metrics.py
+```
+
+## 输出与诊断
+
+正常运行时，估计轨迹写入配置中的 `output_path`。设置环境变量 `VINS_BENCHMARK_DIR` 后，还会生成：
+
+- `feature_timing.csv`：时序跟踪、双目匹配、队列深度和发布时间
+- `backend_timing.csv`：后端处理、优化、边缘化和状态信息
+
+`datasets/`、`outputs/`、ROS bag、ROS 2 bag 和 Python 缓存均已加入 `.gitignore`，不会随代码提交。
+
+## 当前限制
+
+- 双目输入必须具有可靠时间戳；当前实现采用严格时间戳配对。
+- 双目度量初始化依赖正确的左右目标定和相机—IMU 外参。
+- 当前主要覆盖水平校正双目；非校正相机需要确保相机模型和极线阈值设置正确。
+- 回环模块继承自原版 VINS-Mono，双目改动主要集中于 VIO 前端、初始化和滑动窗口后端。
+- 自动评测脚本依赖 ROS 1 命令行工具以及 EuRoC 目录格式。
+
+## 上游项目与引用
+
+本项目建立在 HKUST Aerial Robotics Group 的 VINS-Mono 上：
+
+- Tong Qin, Peiliang Li, Zhenfei Yang, Shaojie Shen, **VINS-Mono: A Robust and Versatile Monocular Visual-Inertial State Estimator**, IEEE Transactions on Robotics, 2018.
+- Tong Qin, Shaojie Shen, **Online Temporal Calibration for Monocular Visual-Inertial Systems**, IROS 2018.
+
+如果在研究中使用本仓库，请引用原始 VINS-Mono 论文；原项目 BibTeX 位于 [support_files/paper_bib.txt](support_files/paper_bib.txt)。
+
+本项目使用 Ceres Solver、DBoW2 和 camodocal 相机模型代码。感谢原作者及相关开源项目。
+
+## 许可证
+
+本仓库继承原项目的 [GPLv3](LICENCE) 许可证。

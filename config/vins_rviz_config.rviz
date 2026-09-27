@@ -182,7 +182,7 @@ Visualization Manager:
           Color: 255; 255; 255
           Color Transformer: FlatColor
           Decay Time: 3000
-          Enabled: false
+          Enabled: true
           Invert Rainbow: true
           Max Color: 0; 0; 0
           Max Intensity: 4096
@@ -199,7 +199,7 @@ Visualization Manager:
           Unreliable: false
           Use Fixed Frame: true
           Use rainbow: false
-          Value: false
+          Value: true
         - Class: rviz/TF
           Enabled: true
           Frame Timeout: 15
@@ -214,7 +214,7 @@ Visualization Manager:
             {}
           Update Interval: 0
           Value: true
-      Enabled: false
+      Enabled: true
       Name: VIO
     - Class: rviz/Group
       Displays:

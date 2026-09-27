@@ -348,18 +348,9 @@ int PoseGraph::detectLoop(KeyFrame* keyframe, int frame_index)
     if (ret.size() >= 1 &&ret[0].Score > 0.05)
         for (unsigned int i = 1; i < ret.size(); i++)
         {
-            //if (ret[i].Score > ret[0].Score * 0.3)
             if (ret[i].Score > 0.015)
             {
                 find_loop = true;
-                int tmp_index = ret[i].Id;
-                if (DEBUG_IMAGE && 0)
-                {
-                    auto it = image_pool.find(tmp_index);
-                    cv::Mat tmp_image = (it->second).clone();
-                    putText(tmp_image, "loop score:" + to_string(ret[i].Score), cv::Point2f(10, 50), cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(255));
-                    cv::hconcat(loop_result, tmp_image, loop_result);
-                }
             }
 
         }

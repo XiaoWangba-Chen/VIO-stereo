@@ -8,6 +8,7 @@ double INIT_DEPTH;
 double MIN_PARALLAX;
 double ACC_N, ACC_W;
 double GYR_N, GYR_W;
+bool IMU_NOISE_CONTINUOUS_DENSITY = false;
 
 std::vector<Eigen::Matrix3d> RIC;
 std::vector<Eigen::Vector3d> TIC;
@@ -65,6 +66,17 @@ double readOptionalDouble(const cv::FileStorage &settings, const std::string &na
 {
     const cv::FileNode node = settings[name];
     return node.empty() ? default_value : static_cast<double>(node);
+}
+
+std::string readOptionalString(const cv::FileStorage &settings, const std::string &name,
+                               const std::string &default_value)
+{
+    const cv::FileNode node = settings[name];
+    if (node.empty())
+        return default_value;
+    std::string value;
+    node >> value;
+    return value;
 }
 
 void readExtrinsic(const cv::FileStorage &settings, int camera_id,
@@ -176,6 +188,15 @@ void readParameters(ros::NodeHandle &n)
     ACC_W = fsSettings["acc_w"];
     GYR_N = fsSettings["gyr_n"];
     GYR_W = fsSettings["gyr_w"];
+    const std::string imu_noise_mode =
+        readOptionalString(fsSettings, "imu_noise_mode", "discrete_std");
+    if (imu_noise_mode == "continuous_density")
+        IMU_NOISE_CONTINUOUS_DENSITY = true;
+    else if (imu_noise_mode == "discrete_std")
+        IMU_NOISE_CONTINUOUS_DENSITY = false;
+    else
+        throw std::runtime_error("imu_noise_mode must be continuous_density or discrete_std");
+    ROS_INFO_STREAM("IMU noise mode: " << imu_noise_mode);
     G.z() = fsSettings["g_norm"];
     ROW = fsSettings["image_height"];
     COL = fsSettings["image_width"];

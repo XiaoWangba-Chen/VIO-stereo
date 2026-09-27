@@ -201,12 +201,15 @@ void Estimator::processIMU(double dt, const Vector3d &linear_acceleration, const
 
 void Estimator::processImage(const FeatureFrameObservations &image, const std_msgs::Header &header)
 {
+    benchmark_timing = BenchmarkTiming();
     ROS_DEBUG("new image coming ------------------------------------------");
     ROS_DEBUG("Adding feature points %lu", image.size());
     if (f_manager.addFeatureCheckParallax(frame_count, image, td))
         marginalization_flag = MARGIN_OLD;
     else
         marginalization_flag = MARGIN_SECOND_NEW;
+    benchmark_timing.keyframe = marginalization_flag == MARGIN_OLD;
+    benchmark_timing.window_states = std::min(frame_count + 1, WINDOW_SIZE + 1);
 
     if (STEREO_USE_DEPTH_INIT && solver_flag == NON_LINEAR)
     {
@@ -249,6 +252,7 @@ void Estimator::processImage(const FeatureFrameObservations &image, const std_ms
         if (frame_count == WINDOW_SIZE)
         {
             bool result = false;
+            TicToc t_initialization;
             if( ESTIMATE_EXTRINSIC != 2 && (header.stamp.toSec() - initial_timestamp) > 0.1)
             {
                if (STEREO_USE_METRIC_INIT)
@@ -261,8 +265,13 @@ void Estimator::processImage(const FeatureFrameObservations &image, const std_ms
             {
                 solver_flag = NON_LINEAR;
                 solveOdometry();
+                benchmark_timing.optimization_ms = t_initialization.toc();
+                benchmark_timing.optimization_ran = true;
+                TicToc t_initial_slide;
                 slideWindow();
                 f_manager.removeFailures();
+                benchmark_timing.marginalization_ms = t_initial_slide.toc();
+                benchmark_timing.marginalization_ran = true;
                 ROS_INFO("Initialization finish!");
                 last_R = Rs[WINDOW_SIZE];
                 last_P = Ps[WINDOW_SIZE];
@@ -271,7 +280,14 @@ void Estimator::processImage(const FeatureFrameObservations &image, const std_ms
                 
             }
             else
+            {
+                benchmark_timing.optimization_ms = t_initialization.toc();
+                benchmark_timing.optimization_ran = true;
+                TicToc t_initial_slide;
                 slideWindow();
+                benchmark_timing.marginalization_ms = t_initial_slide.toc();
+                benchmark_timing.marginalization_ran = true;
+            }
         }
         else
             frame_count++;
@@ -280,6 +296,8 @@ void Estimator::processImage(const FeatureFrameObservations &image, const std_ms
     {
         TicToc t_solve;
         solveOdometry();
+        benchmark_timing.optimization_ms = t_solve.toc();
+        benchmark_timing.optimization_ran = true;
         ROS_DEBUG("solver costs: %fms", t_solve.toc());
 
         if (failureDetection())
@@ -295,6 +313,8 @@ void Estimator::processImage(const FeatureFrameObservations &image, const std_ms
         TicToc t_margin;
         slideWindow();
         f_manager.removeFailures();
+        benchmark_timing.marginalization_ms = t_margin.toc();
+        benchmark_timing.marginalization_ran = true;
         ROS_DEBUG("marginalization costs: %fms", t_margin.toc());
         // prepare output of VINS
         key_poses.clear();
@@ -1079,15 +1099,6 @@ void Estimator::optimization()
                                                                      it_per_id.feature_per_frame[0].cur_td, it_per_frame.cur_td,
                                                                      it_per_id.feature_per_frame[0].uv.y(), it_per_frame.uv.y());
                     problem.AddResidualBlock(f_td, loss_function, para_Pose[imu_i], para_Pose[imu_j], para_Ex_Pose[0], para_Feature[feature_index], para_Td[0]);
-                    /*
-                    double **para = new double *[5];
-                    para[0] = para_Pose[imu_i];
-                    para[1] = para_Pose[imu_j];
-                    para[2] = para_Ex_Pose[0];
-                    para[3] = para_Feature[feature_index];
-                    para[4] = para_Td[0];
-                    f_td->check(para);
-                    */
             }
             else
             {

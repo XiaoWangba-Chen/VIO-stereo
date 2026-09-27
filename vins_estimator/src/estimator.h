@@ -28,6 +28,16 @@
 class Estimator
 {
   public:
+    struct BenchmarkTiming
+    {
+        double optimization_ms = 0.0;
+        double marginalization_ms = 0.0;
+        bool optimization_ran = false;
+        bool marginalization_ran = false;
+        bool keyframe = false;
+        int window_states = 0;
+    };
+
     Estimator();
 
     void setParameter();
@@ -107,6 +117,7 @@ class Estimator
     vector<Vector3d> margin_cloud;
     vector<Vector3d> key_poses;
     double initial_timestamp;
+    BenchmarkTiming benchmark_timing;
 
 
     double para_Pose[WINDOW_SIZE + 1][SIZE_POSE];

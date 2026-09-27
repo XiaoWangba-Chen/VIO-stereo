@@ -10,6 +10,9 @@
 #include <cstdint>
 #include <deque>
 #include <condition_variable>
+#include <chrono>
+#include <cstdlib>
+#include <fstream>
 #include <limits>
 #include <map>
 #include <memory>
@@ -44,6 +47,30 @@ StereoSyncStats sync_stats;
 ros::Time last_left_received;
 ros::Time last_right_received;
 bool image_dimensions_checked = false;
+std::ofstream benchmark_trace;
+std::mutex benchmark_trace_mutex;
+
+int64_t monotonicNanoseconds()
+{
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+void writeFeatureTiming(uint64_t stamp_ns, int64_t start_ns, int64_t feature_end_ns,
+                        double feature_ms, double stereo_ms, int64_t publish_ns,
+                        std::size_t stereo_queue_depth, bool estimator_published)
+{
+    if (!benchmark_trace.is_open())
+        return;
+    std::lock_guard<std::mutex> lock(benchmark_trace_mutex);
+    benchmark_trace << stamp_ns << ',' << start_ns << ',' << feature_end_ns << ','
+                    << feature_ms << ',';
+    if (stereo_ms >= 0.0)
+        benchmark_trace << stereo_ms;
+    benchmark_trace << ',' << publish_ns << ',' << stereo_queue_depth << ','
+                    << (estimator_published ? 1 : 0) << '\n';
+    benchmark_trace.flush();
+}
 }
 
 ros::Publisher pub_img, pub_match, pub_stereo_feature;
@@ -69,6 +96,10 @@ struct StereoMatchJob
     std::vector<int> feature_ids;
     std_msgs::Header header;
     sensor_msgs::PointCloudPtr estimator_features;
+    int64_t frame_start_ns = 0;
+    int64_t feature_end_ns = 0;
+    double feature_ms = 0.0;
+    std::size_t queue_depth = 0;
 };
 
 std::deque<StereoMatchJob> stereo_job_queue;
@@ -265,8 +296,13 @@ void stereoWorkerLoop()
         pub_stereo_feature.publish(makeStereoDiagnosticMessage(job.header, matches));
         if (job.estimator_features)
             pub_img.publish(makeStereoEstimatorMessage(*job.estimator_features, matches));
+        const double stereo_ms = timer.toc();
+        writeFeatureTiming(job.header.stamp.toNSec(), job.frame_start_ns,
+                           job.feature_end_ns, job.feature_ms, stereo_ms,
+                           monotonicNanoseconds(), job.queue_depth,
+                           static_cast<bool>(job.estimator_features));
         stereo_jobs_processed++;
-        ROS_INFO("stereo matcher processing costs: %f", timer.toc());
+        ROS_INFO("stereo matcher processing costs: %f", stereo_ms);
         if (stereo_jobs_processed % 300 == 0)
             printStereoStats();
     }
@@ -322,6 +358,7 @@ bool validateImageDimensions(const sensor_msgs::ImageConstPtr &left_msg,
 void processImage(const sensor_msgs::ImageConstPtr &img_msg,
                   const sensor_msgs::ImageConstPtr &right_msg = sensor_msgs::ImageConstPtr())
 {
+    const int64_t frame_start_ns = monotonicNanoseconds();
     if (!image_dimensions_checked && !validateImageDimensions(img_msg, right_msg))
         return;
 
@@ -380,6 +417,7 @@ void processImage(const sensor_msgs::ImageConstPtr &img_msg,
     }
 
     sensor_msgs::PointCloudPtr pending_stereo_features;
+    bool estimator_message_published = false;
     if (PUB_THIS_FRAME)
     {
         pub_count++;
@@ -424,7 +462,10 @@ void processImage(const sensor_msgs::ImageConstPtr &img_msg,
         else if (NUM_OF_CAM == 2 && STEREO_USE_DEPTH_INIT)
             pending_stereo_features = feature_points;
         else
+        {
             pub_img.publish(feature_points);
+            estimator_message_published = true;
+        }
 
         if (SHOW_TRACK)
         {
@@ -439,6 +480,8 @@ void processImage(const sensor_msgs::ImageConstPtr &img_msg,
         }
     }
 
+    const double feature_ms = t_r.toc();
+    const int64_t feature_end_ns = monotonicNanoseconds();
     if (STEREO_TRACK && right_ptr && stereo_matcher)
     {
         StereoMatchJob job;
@@ -449,14 +492,24 @@ void processImage(const sensor_msgs::ImageConstPtr &img_msg,
         job.feature_ids = trackerData[0].ids;
         job.header = img_msg->header;
         job.estimator_features = pending_stereo_features;
+        job.frame_start_ns = frame_start_ns;
+        job.feature_end_ns = feature_end_ns;
+        job.feature_ms = feature_ms;
         {
             std::lock_guard<std::mutex> lock(stereo_job_mutex);
             stereo_job_queue.push_back(std::move(job));
             stereo_job_max_depth = std::max(stereo_job_max_depth, stereo_job_queue.size());
+            stereo_job_queue.back().queue_depth = stereo_job_queue.size();
         }
         stereo_job_condition.notify_one();
     }
-    ROS_INFO("whole feature tracker processing costs: %f", t_r.toc());
+    else if (estimator_message_published)
+    {
+        writeFeatureTiming(img_msg->header.stamp.toNSec(), frame_start_ns,
+                           feature_end_ns, feature_ms, -1.0,
+                           monotonicNanoseconds(), 0, true);
+    }
+    ROS_INFO("whole feature tracker processing costs: %f", feature_ms);
 }
 
 void clearStereoQueuesAndRestart()
@@ -559,6 +612,15 @@ int main(int argc, char **argv)
     ros::init(argc, argv, "feature_tracker");
     ros::NodeHandle node("~");
     ros::console::set_logger_level(ROSCONSOLE_DEFAULT_NAME, ros::console::levels::Info);
+
+    const char *benchmark_dir = std::getenv("VINS_BENCHMARK_DIR");
+    if (benchmark_dir && *benchmark_dir)
+    {
+        benchmark_trace.open(std::string(benchmark_dir) + "/feature_timing.csv");
+        benchmark_trace << "timestamp_ns,frame_start_monotonic_ns,feature_end_monotonic_ns,"
+                           "feature_tracking_ms,stereo_matching_ms,publish_monotonic_ns,"
+                           "stereo_queue_depth,estimator_published\n";
+    }
 
     try
     {

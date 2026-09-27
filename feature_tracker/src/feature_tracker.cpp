@@ -172,15 +172,30 @@ void FeatureTracker::rejectWithF()
     {
         ROS_DEBUG("FM ransac begins");
         TicToc t_f;
+
+        // cur_pts 和 forw_pts 分别是同一批特征点在前后两帧中的原始像素坐标。
+        // 原始像素坐标含有相机畸变，不能直接套用理想针孔相机的基础矩阵模型，
+        // 因此下面先将它们转换到一个无畸变的“虚拟针孔相机”像素平面。
         vector<cv::Point2f> un_cur_pts(cur_pts.size()), un_forw_pts(forw_pts.size());
         for (unsigned int i = 0; i < cur_pts.size(); i++)
         {
             Eigen::Vector3d tmp_p;
+
+            // 将当前帧的像素点 (u, v) 通过实际相机模型反投影成相机坐标系中的
+            // 一条观察射线 (X, Y, Z)。tmp_p 只表示方向，不是真实的三维地图点。
             m_camera->liftProjective(Eigen::Vector2d(cur_pts[i].x, cur_pts[i].y), tmp_p);
+
+            // 先用 X/Z、Y/Z 得到无畸变归一化坐标，再用人为设定的虚拟内参
+            // fx = fy = FOCAL_LENGTH、cx = COL/2、cy = ROW/2 投影回像素尺度：
+            // u' = FOCAL_LENGTH * X/Z + COL/2
+            // v' = FOCAL_LENGTH * Y/Z + ROW/2
+            // 这样 F_THRESHOLD 就可以继续使用直观的“像素级”阈值。
             tmp_p.x() = FOCAL_LENGTH * tmp_p.x() / tmp_p.z() + COL / 2.0;
             tmp_p.y() = FOCAL_LENGTH * tmp_p.y() / tmp_p.z() + ROW / 2.0;
             un_cur_pts[i] = cv::Point2f(tmp_p.x(), tmp_p.y());
 
+            // 对下一帧中与之对应的光流跟踪点执行完全相同的去畸变和虚拟投影。
+            // 因而 un_cur_pts[i] 与 un_forw_pts[i] 仍然是同一个特征的匹配点对。
             m_camera->liftProjective(Eigen::Vector2d(forw_pts[i].x, forw_pts[i].y), tmp_p);
             tmp_p.x() = FOCAL_LENGTH * tmp_p.x() / tmp_p.z() + COL / 2.0;
             tmp_p.y() = FOCAL_LENGTH * tmp_p.y() / tmp_p.z() + ROW / 2.0;
@@ -188,6 +203,9 @@ void FeatureTracker::rejectWithF()
         }
 
         vector<uchar> status;
+
+        // 在无畸变点对上使用基础矩阵 RANSAC：满足主要相机运动几何约束的点
+        // status 为 1，光流误匹配或不符合该运动模型的点 status 为 0。
         cv::findFundamentalMat(un_cur_pts, un_forw_pts, cv::FM_RANSAC, F_THRESHOLD, 0.99, status);
         int size_a = cur_pts.size();
         reduceVector(prev_pts, status);

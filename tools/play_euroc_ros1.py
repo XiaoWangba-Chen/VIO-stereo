@@ -119,9 +119,9 @@ def main():
     parser.add_argument("--stereo", action="store_true", help="publish exact cam0/cam1 pairs")
     parser.add_argument("--rectify-euroc", action="store_true",
                         help="undistort and horizontally rectify EuRoC stereo images")
-    parser.add_argument("--left-topic", default="/d435i/infra1/image_raw")
-    parser.add_argument("--right-topic", default="/d435i/infra2/image_raw")
-    parser.add_argument("--imu-topic", default="/d435i/imu")
+    parser.add_argument("--left-topic", default="/cam0/image_raw")
+    parser.add_argument("--right-topic", default="/cam1/image_raw")
+    parser.add_argument("--imu-topic", default="/imu0")
     parser.add_argument("--validate-only", action="store_true", help="validate CSV pairing without ROS playback")
     args = parser.parse_args(rospy.myargv()[1:])
 
@@ -169,10 +169,10 @@ def main():
 
     rectification_maps = euroc_rectification_maps(args.dataset) if args.rectify_euroc else None
 
-    rospy.init_node("euroc_d435i_player")
+    rospy.init_node("euroc_player")
     left_pub = rospy.Publisher(args.left_topic, Image, queue_size=10)
     right_pub = rospy.Publisher(args.right_topic, Image, queue_size=10) if args.stereo else None
-    depth_pub = rospy.Publisher("/d435i/depth/image_raw", Image, queue_size=10)
+    depth_pub = rospy.Publisher("/depth0/image_raw", Image, queue_size=10)
     imu_pub = rospy.Publisher(args.imu_topic, Imu, queue_size=2000)
     bridge = CvBridge()
     time.sleep(3.0)
